@@ -20,7 +20,7 @@
  */
 
 import type { Triple } from "./types.ts";
-import { llm } from "../llm.ts";
+import { llmFast } from "../llm.ts";
 import { extractJsonFromResponse, normalizeEntity } from "../utils.ts";
 
 /** Result of extracting triples from a piece of text */
@@ -48,7 +48,7 @@ export interface OpenIEResult {
  */
 export async function extractTriples(text: string): Promise<OpenIEResult> {
   try {
-    const response = await llm.invoke([
+    const response = await llmFast.invoke([
       {
         role: "system" as const,
         content: `You are a knowledge extraction system. Extract factual triples and rate salience from conversation text.

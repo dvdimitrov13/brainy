@@ -22,7 +22,7 @@
  *   - `async/await` works identically to Python's asyncio.
  */
 
-import { llm } from "../llm.ts";
+import { llmFast } from "../llm.ts";
 
 export class CompactMemory {
   /**
@@ -48,7 +48,7 @@ export class CompactMemory {
    * @returns the updated one-sentence summary
    */
   async update(currentSummary: string, newExchange: string): Promise<string> {
-    const response = await llm.invoke([
+    const response = await llmFast.invoke([
       {
         role: "system" as const,
         content: `You maintain a single-sentence summary of an ongoing conversation.
@@ -115,7 +115,7 @@ Updated one-sentence summary:`,
     // Take the most recent summaries (cap at 10 to keep prompt small)
     const recentSummaries = this.summaryHistory.slice(-10);
 
-    const response = await llm.invoke([
+    const response = await llmFast.invoke([
       {
         role: "system" as const,
         content: `You are given a sequence of conversation summaries taken at different points in time.

@@ -12,13 +12,27 @@
  *
  * Both nodes/retrieve.ts and nodes/memorize.ts import from here
  * to ensure they're working with the same memory stores.
+ *
+ * The `reset()` function creates fresh instances — needed by the
+ * evaluation harness to clear state between test questions.
  */
 
 import { HippoRAG } from "./hipporag/index.ts";
 import { CompactMemory } from "./memory/compact-memory.ts";
 
 /** The HippoRAG2 vector memory system (knowledge graph + PPR retrieval) */
-export const hipporag = new HippoRAG();
+export let hipporag = new HippoRAG();
 
 /** The compact memory system (one-sentence summary + summary-of-summaries) */
-export const compactMemory = new CompactMemory();
+export let compactMemory = new CompactMemory();
+
+/**
+ * Reset both memory systems to a fresh state.
+ *
+ * Used by the evaluation harness between test questions so each
+ * question starts with a clean knowledge graph and summary.
+ */
+export function resetMemory(): void {
+  hipporag = new HippoRAG();
+  compactMemory = new CompactMemory();
+}

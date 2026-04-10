@@ -22,15 +22,32 @@ import { ChatAnthropic } from "@langchain/anthropic";
 import { VoyageAIClient } from "voyageai";
 
 // ──────────────────────────────────────────────
-// LLM — Claude Sonnet via Anthropic
+// LLMs — two tiers for different tasks
 // ──────────────────────────────────────────────
 // Reads ANTHROPIC_API_KEY from process.env automatically (Bun loads .env).
-// `temperature: 0` makes outputs deterministic — good for triple extraction
-// and summarisation where we want consistency.
+
+/**
+ * Primary LLM (Claude Sonnet) — used for response generation and the
+ * LLM judge in evaluation. Higher quality, slower.
+ */
 export const llm = new ChatAnthropic({
   model: "claude-sonnet-4-20250514",
   temperature: 0,
   maxTokens: 2048,
+});
+
+/**
+ * Fast LLM (Claude Haiku) — used for "processing" tasks that don't need
+ * Sonnet's full reasoning: triple extraction (OpenIE), compact memory
+ * summarisation, and recognition memory filtering.
+ *
+ * These tasks are structured (extract JSON, produce a summary sentence,
+ * filter a list) and Haiku handles them well at ~5x the speed.
+ */
+export const llmFast = new ChatAnthropic({
+  model: "claude-haiku-4-5-20251001",
+  temperature: 0,
+  maxTokens: 1024,
 });
 
 // ──────────────────────────────────────────────
