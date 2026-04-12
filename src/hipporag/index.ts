@@ -279,12 +279,34 @@ export class HippoRAG {
       typeFilter.length === 0 ||
       typeFilter.some((t) => passage.tags.type.includes(t as any));
 
+    // Topic matching: fuzzy word matching that handles plurals and morphological
+    // variants. Two words match if they share a prefix of at least 3 chars
+    // (e.g., "property"/"properties" share "propert", "bike"/"biking" share "bik").
     const topicMatch =
       !topicFilter ||
       topicFilter.length === 0 ||
-      topicFilter.some((t) =>
-        passage.tags.topics.some((pt) => pt.includes(t.toLowerCase()))
-      );
+      topicFilter.some((filterTopic) => {
+        const ft = filterTopic.toLowerCase().replace(/[-_]/g, " ");
+        return passage.tags.topics.some((passageTopic) => {
+          const pt = passageTopic.toLowerCase().replace(/[-_]/g, " ");
+          const ftWords = ft.split(/\s+/);
+          const ptWords = pt.split(/\s+/);
+          return ftWords.some((fw) =>
+            ptWords.some((pw) => {
+              // Shared prefix of at least 3 chars
+              const minLen = Math.min(fw.length, pw.length);
+              if (minLen < 3) return fw === pw; // short words must match exactly
+              const prefixLen = Math.min(minLen, Math.max(fw.length, pw.length));
+              let shared = 0;
+              for (let i = 0; i < Math.min(fw.length, pw.length); i++) {
+                if (fw[i] === pw[i]) shared++;
+                else break;
+              }
+              return shared >= 3;
+            })
+          );
+        });
+      });
 
     return typeMatch && topicMatch;
   }
