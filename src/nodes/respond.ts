@@ -26,7 +26,6 @@ import {
 import type { BrainyState } from "../state.ts";
 import { llm } from "../llm.ts";
 import { hipporag } from "../singletons.ts";
-import { chunkRerankPack } from "../chunking.ts";
 import type { Triple } from "../hipporag/types.ts";
 
 /**
@@ -158,16 +157,18 @@ ${memoryBlock ? `--- Your Memories ---\n${memoryBlock}\n--- End Memories ---` : 
         const query = (toolCall.args as { query: string }).query;
 
         // Phase 2: full PPR retrieval using the triples from Phase 1
+        // HippoRAG stores dense summaries (4:1 compressed), so passages
+        // are already compact — return them directly.
         const passages = await hipporag.retrievePassages(
           query,
           triples
         );
 
-        // Chunk, rerank, and pack within 1024 token budget
-        const passageText = await chunkRerankPack(
-          query,
-          passages.map((p) => p.text)
-        );
+        const passageText = passages.length > 0
+          ? passages
+              .map((p, idx) => `[Memory ${idx + 1}]: ${p.text}`)
+              .join("\n\n")
+          : "No relevant memories found.";
 
         messages.push(
           new ToolMessage({

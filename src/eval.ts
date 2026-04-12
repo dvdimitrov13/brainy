@@ -21,7 +21,6 @@
 import { HippoRAG } from "./hipporag/index.ts";
 import { CompactMemory } from "./memory/compact-memory.ts";
 import { llm } from "./llm.ts";
-import { chunkRerankPack } from "./chunking.ts";
 import { HumanMessage, SystemMessage } from "@langchain/core/messages";
 
 // ══════════════════════════════════════════════
@@ -66,13 +65,11 @@ export interface TurnSnapshot {
 export interface RetrievalTrace {
   /** Phase 1: triples surfaced automatically */
   triples: { subject: string; predicate: string; object: string }[];
-  /** Phase 2: raw passages retrieved via PPR (before chunking) */
+  /** Phase 2: passages retrieved via PPR (dense summaries) */
   passages: { text: string; score?: number }[];
-  /** Phase 2 output: reranked and packed chunks within token budget */
-  rerankedContext: string;
   /** Time for Phase 1 (triple retrieval + recognition memory) */
   tripleRetrievalMs: number;
-  /** Time for Phase 2 (PPR + chunking + reranking) */
+  /** Time for Phase 2 (PPR + passage ranking) */
   passageRetrievalMs: number;
 }
 
@@ -271,13 +268,13 @@ export async function evaluateQuestion(
       let summaryText: string | undefined;
 
       if (compactMemory.shouldSummarize(conversationBuffer)) {
-        // Index each pending exchange as a separate passage (in parallel)
-        const [summary] = await Promise.all([
-          compactMemory.summarize(conversationBuffer),
-          ...pendingExchanges.map((ex) => hipporag.index(ex)),
-        ]);
-        summaryText = summary;
-        conversationBuffer = summary;
+        // Summarize each pending exchange individually (4:1 compression)
+        const summaries = await compactMemory.summarizeExchanges(pendingExchanges);
+        // Index each summary into HippoRAG (parallel)
+        await Promise.all(summaries.map((s) => hipporag.index(s)));
+        // Replace buffer with concatenated summaries
+        summaryText = "[Summary of earlier conversation]\n" + summaries.join("\n\n");
+        conversationBuffer = summaryText;
         pendingExchanges = [];
         summarized = true;
         hipporag.forget();
@@ -308,10 +305,11 @@ export async function evaluateQuestion(
 
     // ── Session boundary: flush everything into HippoRAG ──
     // Each session is a separate conversation (like a new ChatGPT thread).
-    // Index all pending exchanges into long-term memory and reset the buffer.
+    // Summarize each pending exchange, then index summaries into long-term memory.
     // HippoRAG is the only memory that persists across sessions.
     if (pendingExchanges.length > 0) {
-      await Promise.all(pendingExchanges.map((ex) => hipporag.index(ex)));
+      const summaries = await compactMemory.summarizeExchanges(pendingExchanges);
+      await Promise.all(summaries.map((s) => hipporag.index(s)));
       pendingExchanges = [];
     }
     conversationBuffer = "";
@@ -326,17 +324,17 @@ export async function evaluateQuestion(
   const tripleRetrievalMs = Date.now() - tripleStart;
 
   // ── Phase 2: Retrieve passages via PPR (the "recall" tool) ──
+  // HippoRAG stores dense summaries (4:1 compressed), so passages
+  // are already compact — return them directly.
   const passageStart = Date.now();
   const passages = await hipporag.retrievePassages(item.question, triples);
-
-  // Chunk, rerank, and pack within 1024 token budget
-  const retrievedContext = await chunkRerankPack(
-    item.question,
-    passages.map((p) => p.text)
-  );
   const passageRetrievalMs = Date.now() - passageStart;
 
   const retrievalTimeMs = tripleRetrievalMs + passageRetrievalMs;
+
+  const retrievedContext = passages
+    .map((p, i) => `[Memory ${i + 1}]: ${p.text}`)
+    .join("\n\n");
 
   // Build the retrieval trace for frontend visualization
   const retrieval: RetrievalTrace = {
@@ -346,7 +344,6 @@ export async function evaluateQuestion(
       object: t.object,
     })),
     passages: passages.map((p) => ({ text: p.text })),
-    rerankedContext: retrievedContext,
     tripleRetrievalMs,
     passageRetrievalMs,
   };
