@@ -24,7 +24,7 @@
  */
 
 import type { Triple } from "./types.ts";
-import { llmFast } from "../llm.ts";
+import { llmMid } from "../llm.ts";
 import { extractJsonFromResponse } from "../utils.ts";
 
 /**
@@ -60,7 +60,7 @@ export async function filterTriples(
       )
       .join("\n");
 
-    const response = await llmFast.invoke([
+    const response = await llmMid.invoke([
       {
         role: "system" as const,
         content: `You are a relevance filter. Given a query and a list of knowledge triples, identify which triples are actually relevant for answering the query.

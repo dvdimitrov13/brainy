@@ -37,15 +37,28 @@ export const llm = new ChatAnthropic({
 });
 
 /**
- * Fast LLM (Claude Haiku) — used for "processing" tasks that don't need
- * Sonnet's full reasoning: triple extraction (OpenIE), compact memory
- * summarisation, and recognition memory filtering.
+ * Fast LLM (Claude Haiku) — used for high-volume "processing" tasks:
+ * triple extraction (OpenIE) and compact memory summarisation.
  *
- * These tasks are structured (extract JSON, produce a summary sentence,
- * filter a list) and Haiku handles them well at ~5x the speed.
+ * These tasks are structured (extract JSON, produce a summary sentence)
+ * and Haiku handles them well at ~5x the speed.
  */
 export const llmFast = new ChatAnthropic({
   model: "claude-haiku-4-5-20251001",
+  temperature: 0,
+  maxTokens: 1024,
+});
+
+/**
+ * Mid-tier LLM (Claude Sonnet) — used for quality-sensitive processing:
+ * recognition memory filtering (triple relevance judgement).
+ *
+ * Recognition memory is the gate that decides which triples seed PPR,
+ * so filtering quality directly impacts retrieval accuracy. Sonnet's
+ * stronger reasoning helps here more than in mechanical extraction.
+ */
+export const llmMid = new ChatAnthropic({
+  model: "claude-sonnet-4-20250514",
   temperature: 0,
   maxTokens: 1024,
 });

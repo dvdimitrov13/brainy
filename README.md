@@ -54,8 +54,9 @@ The key insight: PPR finds passages connected to the query through **entity chai
 |-----------|-----------|
 | Runtime | [Bun](https://bun.sh) |
 | Agent framework | [LangGraph](https://langchain-ai.github.io/langgraphjs/) (TypeScript) |
-| LLM (responses) | Claude Sonnet via `@langchain/anthropic` |
-| LLM (processing) | Claude Haiku (triple extraction, summarisation, recognition memory) |
+| LLM (responses + judging) | Claude Sonnet via `@langchain/anthropic` |
+| LLM (recognition memory) | Claude Sonnet (quality-sensitive triple filtering) |
+| LLM (extraction + summarisation) | Claude Haiku (OpenIE, compact memory) |
 | Embeddings | [Voyage AI 3.5](https://docs.voyageai.com/) |
 | Graph algorithm | Personalized PageRank (custom power iteration implementation) |
 
@@ -110,16 +111,20 @@ bun run src/eval.ts --count 5
 
 #### Results (oracle dataset, 2 per category, 12 questions)
 
-We ran the benchmark with two LLM configurations for the processing tasks (triple extraction, summarisation, recognition memory filtering):
+We ran the benchmark with three LLM configurations for the processing tasks (triple extraction, summarisation, recognition memory filtering):
 
-| | Sonnet (processing) | Haiku (processing) |
-|---|---|---|
-| **Overall accuracy** | **83.3%** (10/12) | 75.0% (9/12) |
-| **Avg indexing time** | 61.3s/question | **28.0s/question** |
-| **Avg retrieval time** | 3.0s/question | 2.8s/question |
-| **Avg KG size** | 52 entities, 51 facts | 53 entities, 50 facts |
+| | Sonnet (all processing) | Haiku (all processing) | **Hybrid** (default) |
+|---|---|---|---|
+| **Recognition memory** | Sonnet | Haiku | Sonnet |
+| **OpenIE + summarisation** | Sonnet | Haiku | Haiku |
+| **Overall accuracy** | 83.3% (10/12) | 75.0% (9/12) | **83.3% (10/12)** |
+| **Avg indexing time** | 61.3s/question | 28.0s/question | **26.3s/question** |
+| **Avg retrieval time** | 3.0s/question | 2.8s/question | **1.9s/question** |
+| **Avg KG size** | 52 entities, 51 facts | 53 entities, 50 facts | 52 entities, 49 facts |
 
-**Breakdown by question type (Sonnet processing):**
+The **hybrid config** (default) gives the best of both worlds: Sonnet-level accuracy at Haiku-level speed. Recognition memory is the quality-sensitive gate that decides which triples seed the PPR graph search, so Sonnet's stronger reasoning pays off there. OpenIE extraction and summarisation are more mechanical tasks where Haiku performs equally well.
+
+**Breakdown by question type (hybrid config):**
 
 | Category | Score | Description |
 |----------|-------|-------------|
@@ -131,8 +136,8 @@ We ran the benchmark with two LLM configurations for the processing tasks (tripl
 | Multi-session reasoning | 0/2 (0%) | Synthesizing across sessions |
 
 **Key findings:**
-- **Haiku is 2.2x faster** for processing with ~8% accuracy drop, concentrated in harder reasoning categories (knowledge updates)
-- **Multi-session reasoning** (counting/aggregation across sessions) is the weakest category — both LLM tiers fail on these. This is a top-K retrieval truncation issue: when the answer requires synthesizing information from 3+ separate passages, retrieving only top-3 may miss some
+- **Hybrid config matches Sonnet accuracy while being 2.3x faster** — recognition memory is the only step where LLM quality matters for retrieval accuracy
+- **Multi-session reasoning** (counting/aggregation across sessions) is the weakest category — all three configs fail on these. This is a top-K retrieval truncation issue: when the answer requires synthesizing information from 3+ separate passages, retrieving only top-3 may miss some
 - **Single-session tasks** are near-perfect — the knowledge graph effectively indexes and retrieves facts from individual conversation sessions
 - The knowledge graph grows to ~50 entities and ~50 facts per question on average, creating a rich retrieval structure even from relatively short conversations
 
