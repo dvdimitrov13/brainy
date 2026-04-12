@@ -184,11 +184,33 @@ export function selectItems(
 }
 
 /**
+ * Count total turn pairs in an eval item (for progress reporting).
+ */
+export function countTurnPairs(item: EvalItem): number {
+  let count = 0;
+  for (const session of item.haystack_sessions) {
+    const turns = Object.values(session) as Turn[];
+    count += Math.ceil(turns.length / 2);
+  }
+  return count;
+}
+
+/**
+ * Callback fired after each turn during evaluation.
+ * Used by the SSE server to stream turn-level progress.
+ */
+export type OnTurnCallback = (snapshot: TurnSnapshot, totalTurns: number) => void;
+
+/**
  * Evaluate a single LongMemEval question.
  * Captures turn-level snapshots for visualization.
+ *
+ * @param item — the question to evaluate
+ * @param onTurn — optional callback fired after each turn completes
  */
 export async function evaluateQuestion(
-  item: EvalItem
+  item: EvalItem,
+  onTurn?: OnTurnCallback
 ): Promise<EvalResult> {
   const hipporag = new HippoRAG();
   const compactMemory = new CompactMemory();
@@ -196,6 +218,7 @@ export async function evaluateQuestion(
   const turns: TurnSnapshot[] = [];
   let globalTurnIndex = 0;
 
+  const totalTurns = countTurnPairs(item);
   const indexStart = Date.now();
 
   for (let sessIdx = 0; sessIdx < item.haystack_sessions.length; sessIdx++) {
@@ -237,7 +260,7 @@ export async function evaluateQuestion(
       const bufferTokensAfter = estimateTokens(conversationBuffer);
       const kgStats = hipporag.getStats();
 
-      turns.push({
+      const snapshot: TurnSnapshot = {
         turnIndex: globalTurnIndex++,
         sessionIndex: sessIdx,
         exchangeText,
@@ -250,7 +273,10 @@ export async function evaluateQuestion(
           entities: kgStats.entities,
           facts: kgStats.facts,
         },
-      });
+      };
+
+      turns.push(snapshot);
+      onTurn?.(snapshot, totalTurns);
     }
   }
 

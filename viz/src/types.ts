@@ -57,9 +57,32 @@ export interface QuestionDetail {
   }[];
 }
 
-/** SSE event from the eval API */
+/** SSE events from the eval API */
 export type SSEEvent =
-  | { type: "start"; total: number }
-  | { type: "progress"; completed: number; total: number; result: EvalResult }
-  | { type: "error"; message: string; completed: number; total: number }
+  | { type: "start"; totalQuestions: number; totalTurns: number }
+  | {
+      type: "question_start";
+      questionIndex: number;
+      questionId: string;
+      questionType: string;
+      question: string;
+      totalTurns: number;
+    }
+  | {
+      type: "turn";
+      questionIndex: number;
+      snapshot: TurnSnapshot;
+      turnsDone: number;
+      totalTurns: number;
+      globalTurnsDone: number;
+      globalTotalTurns: number;
+    }
+  | {
+      type: "question_done";
+      questionIndex: number;
+      completed: number;
+      total: number;
+      result: EvalResult;
+    }
+  | { type: "error"; message: string; questionIndex: number }
   | { type: "done"; results: EvalResult[] };

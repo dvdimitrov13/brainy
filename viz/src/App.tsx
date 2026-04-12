@@ -5,21 +5,20 @@ import Overview from "./Overview";
 import QuestionDetail from "./QuestionDetail";
 import EvalControls from "./EvalControls";
 import DatasetBrowser from "./DatasetBrowser";
+import LiveProgress from "./LiveProgress";
 
 type View = "overview" | "dataset";
 
 function App() {
-  // Dataset state (loaded from API)
-  const [datasetQuestions, setDatasetQuestions] = useState<DatasetQuestion[]>([]);
+  const [datasetQuestions, setDatasetQuestions] = useState<DatasetQuestion[]>(
+    []
+  );
   const [datasetTypes, setDatasetTypes] = useState<string[]>([]);
   const [datasetError, setDatasetError] = useState<string | null>(null);
-
-  // Results state (from eval runs or loaded file)
   const [results, setResults] = useState<EvalResult[]>([]);
   const [selected, setSelected] = useState<EvalResult | null>(null);
   const [view, setView] = useState<View>("overview");
 
-  // Eval runner
   const eval_ = useEval();
 
   // Load dataset from API on mount
@@ -40,14 +39,14 @@ function App() {
       });
   }, []);
 
-  // Sync eval results into main results state
+  // Sync completed eval results
   useEffect(() => {
     if (eval_.results.length > 0) {
       setResults(eval_.results);
     }
   }, [eval_.results]);
 
-  // Handle file upload (fallback when API not available)
+  // Handle file upload
   const handleFile = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -66,13 +65,10 @@ function App() {
     reader.readAsText(file);
   };
 
-  // Detail view for a specific question
+  // Detail view
   if (selected) {
     return (
-      <QuestionDetail
-        result={selected}
-        onBack={() => setSelected(null)}
-      />
+      <QuestionDetail result={selected} onBack={() => setSelected(null)} />
     );
   }
 
@@ -86,7 +82,6 @@ function App() {
         <p>LongMemEval benchmark — evaluate and explore results</p>
       </div>
 
-      {/* Tab navigation */}
       {hasApi && (
         <div className="tab-bar">
           <button
@@ -104,21 +99,28 @@ function App() {
         </div>
       )}
 
-      {/* Eval controls (only if API is available) */}
       {hasApi && (
         <EvalControls
           types={datasetTypes}
           running={eval_.running}
-          completed={eval_.completed}
-          total={eval_.total}
+          completed={eval_.questionsCompleted}
+          total={eval_.totalQuestions}
           onRun={eval_.runSweep}
           onStop={eval_.stop}
         />
       )}
 
-      {/* Error from eval */}
-      {eval_.error && (
-        <div className="error-banner">{eval_.error}</div>
+      {eval_.error && <div className="error-banner">{eval_.error}</div>}
+
+      {/* Live progress — shows when eval is running */}
+      {eval_.running && eval_.activeQuestion && (
+        <LiveProgress
+          activeQuestion={eval_.activeQuestion}
+          questionsCompleted={eval_.questionsCompleted}
+          totalQuestions={eval_.totalQuestions}
+          globalTurnsDone={eval_.globalTurnsDone}
+          globalTotalTurns={eval_.globalTotalTurns}
+        />
       )}
 
       {/* Main content */}

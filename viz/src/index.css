@@ -511,6 +511,87 @@ body {
   font-size: 0.8rem;
 }
 
+/* ── Live progress ── */
+
+.live-progress {
+  background: var(--surface);
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  padding: 1rem 1.25rem;
+  margin-bottom: 1.5rem;
+  animation: fadeIn 0.2s ease;
+}
+
+.live-global {
+  margin-bottom: 0.75rem;
+}
+
+.live-global-info {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.8rem;
+  color: var(--text-dim);
+  margin-bottom: 0.35rem;
+}
+
+.live-global-turns {
+  color: var(--accent);
+}
+
+.progress-bar.thin {
+  height: 4px;
+}
+
+.progress-fill.question-fill {
+  background: var(--pass);
+}
+
+.live-question {
+  cursor: pointer;
+  padding: 0.5rem 0;
+}
+
+.live-question-header {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 0.35rem;
+}
+
+.live-question-type {
+  font-size: 0.65rem;
+  padding: 0.15rem 0.4rem;
+  border-radius: 3px;
+  background: var(--surface-hover);
+  color: var(--text-dim);
+  flex-shrink: 0;
+}
+
+.live-question-text {
+  flex: 1;
+  font-size: 0.85rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.live-question-turns {
+  font-size: 0.75rem;
+  color: var(--pass);
+  flex-shrink: 0;
+}
+
+.live-turns {
+  margin-top: 0.75rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  max-height: 400px;
+  overflow-y: auto;
+}
+
 .error-text {
   color: var(--fail);
   font-size: 0.85rem;

@@ -1,49 +1,59 @@
 import { useState, useCallback, useRef } from "react";
-import type { EvalResult, SSEEvent } from "./types";
+import type { EvalResult, TurnSnapshot, SSEEvent } from "./types";
+
+/** Info about the currently executing question */
+export interface ActiveQuestion {
+  questionIndex: number;
+  questionId: string;
+  questionType: string;
+  question: string;
+  totalTurns: number;
+  turnsDone: number;
+  /** Turn snapshots accumulated so far for this question */
+  liveSnapshots: TurnSnapshot[];
+}
 
 export interface EvalState {
-  /** Whether an eval is currently running */
   running: boolean;
-  /** Progress: completed / total */
-  completed: number;
-  total: number;
-  /** Results accumulated so far (live updates as questions complete) */
+  /** Questions completed / total */
+  questionsCompleted: number;
+  totalQuestions: number;
+  /** Global turn progress across all questions */
+  globalTurnsDone: number;
+  globalTotalTurns: number;
+  /** Currently executing question (null if between questions or idle) */
+  activeQuestion: ActiveQuestion | null;
+  /** Completed results */
   results: EvalResult[];
-  /** Error message if something went wrong */
   error: string | null;
 }
 
-/**
- * Hook for running evaluations via the SSE API.
- *
- * Returns the current eval state + functions to start/stop evals.
- * Results stream in real-time as each question completes.
- */
 export function useEval() {
   const [state, setState] = useState<EvalState>({
     running: false,
-    completed: 0,
-    total: 0,
+    questionsCompleted: 0,
+    totalQuestions: 0,
+    globalTurnsDone: 0,
+    globalTotalTurns: 0,
+    activeQuestion: null,
     results: [],
     error: null,
   });
 
   const abortRef = useRef<AbortController | null>(null);
 
-  /**
-   * Start an SSE eval stream from the given URL.
-   * Used by both runSweep and runQuestion.
-   */
   const startStream = useCallback(async (url: string) => {
-    // Abort any existing run
     abortRef.current?.abort();
     const abort = new AbortController();
     abortRef.current = abort;
 
     setState({
       running: true,
-      completed: 0,
-      total: 0,
+      questionsCompleted: 0,
+      totalQuestions: 0,
+      globalTurnsDone: 0,
+      globalTotalTurns: 0,
+      activeQuestion: null,
       results: [],
       error: null,
     });
@@ -76,9 +86,8 @@ export function useEval() {
 
         buffer += decoder.decode(value, { stream: true });
 
-        // Parse SSE events (each ends with \n\n)
         const parts = buffer.split("\n\n");
-        buffer = parts.pop() ?? ""; // Keep incomplete part
+        buffer = parts.pop() ?? "";
 
         for (const part of parts) {
           const line = part.trim();
@@ -87,27 +96,72 @@ export function useEval() {
           try {
             const event: SSEEvent = JSON.parse(line.slice(6));
 
-            if (event.type === "start") {
-              setState((s) => ({ ...s, total: event.total }));
-            } else if (event.type === "progress") {
-              setState((s) => ({
-                ...s,
-                completed: event.completed,
-                total: event.total,
-                results: [...s.results, event.result],
-              }));
-            } else if (event.type === "error") {
-              setState((s) => ({
-                ...s,
-                completed: event.completed,
-                error: event.message,
-              }));
-            } else if (event.type === "done") {
-              setState((s) => ({
-                ...s,
-                running: false,
-                results: event.results,
-              }));
+            switch (event.type) {
+              case "start":
+                setState((s) => ({
+                  ...s,
+                  totalQuestions: event.totalQuestions,
+                  globalTotalTurns: event.totalTurns,
+                }));
+                break;
+
+              case "question_start":
+                setState((s) => ({
+                  ...s,
+                  activeQuestion: {
+                    questionIndex: event.questionIndex,
+                    questionId: event.questionId,
+                    questionType: event.questionType,
+                    question: event.question,
+                    totalTurns: event.totalTurns,
+                    turnsDone: 0,
+                    liveSnapshots: [],
+                  },
+                }));
+                break;
+
+              case "turn":
+                setState((s) => ({
+                  ...s,
+                  globalTurnsDone: event.globalTurnsDone,
+                  globalTotalTurns: event.globalTotalTurns,
+                  activeQuestion: s.activeQuestion
+                    ? {
+                        ...s.activeQuestion,
+                        turnsDone: event.turnsDone,
+                        liveSnapshots: [
+                          ...s.activeQuestion.liveSnapshots,
+                          event.snapshot,
+                        ],
+                      }
+                    : null,
+                }));
+                break;
+
+              case "question_done":
+                setState((s) => ({
+                  ...s,
+                  questionsCompleted: event.completed,
+                  results: [...s.results, event.result],
+                  activeQuestion: null,
+                }));
+                break;
+
+              case "error":
+                setState((s) => ({
+                  ...s,
+                  error: event.message,
+                }));
+                break;
+
+              case "done":
+                setState((s) => ({
+                  ...s,
+                  running: false,
+                  results: event.results,
+                  activeQuestion: null,
+                }));
+                break;
             }
           } catch {
             // Skip malformed events
@@ -115,7 +169,6 @@ export function useEval() {
         }
       }
 
-      // Stream ended
       setState((s) => ({ ...s, running: false }));
     } catch (err) {
       if ((err as Error).name === "AbortError") return;
@@ -127,7 +180,6 @@ export function useEval() {
     }
   }, []);
 
-  /** Run a full eval sweep with N questions per category */
   const runSweep = useCallback(
     (count: number | "all", type?: string) => {
       let url = `/api/eval/run?count=${count}`;
@@ -137,7 +189,6 @@ export function useEval() {
     [startStream]
   );
 
-  /** Run a single question by ID */
   const runQuestion = useCallback(
     (questionId: string) => {
       startStream(`/api/eval/question?id=${encodeURIComponent(questionId)}`);
@@ -145,10 +196,9 @@ export function useEval() {
     [startStream]
   );
 
-  /** Stop the current eval run */
   const stop = useCallback(() => {
     abortRef.current?.abort();
-    setState((s) => ({ ...s, running: false }));
+    setState((s) => ({ ...s, running: false, activeQuestion: null }));
   }, []);
 
   return { ...state, runSweep, runQuestion, stop };

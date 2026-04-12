@@ -6,26 +6,25 @@
  *   - Trigger eval runs (full sweep or single question)
  *   - Stream results via Server-Sent Events (SSE)
  *
- * SSE streaming means the frontend gets results in real-time as each
- * question completes, rather than waiting for the entire eval to finish.
+ * SSE streams turn-level events so the frontend can show live progress
+ * as each turn is processed, not just when entire questions complete.
  *
  * Usage:
  *   bun run src/server.ts
- *
- * Then open http://localhost:3001 (or use the Vite dev server with proxy).
  */
 
 import {
   loadDataset,
   selectItems,
   evaluateQuestion,
+  countTurnPairs,
   type EvalItem,
   type EvalResult,
+  type TurnSnapshot,
 } from "./eval.ts";
 
 const PORT = 3001;
 
-/** Currently loaded dataset (cached after first load) */
 let cachedDataset: EvalItem[] | null = null;
 
 async function getDataset(): Promise<EvalItem[]> {
@@ -36,97 +35,125 @@ async function getDataset(): Promise<EvalItem[]> {
 }
 
 /**
- * Create an SSE response that streams eval results as they complete.
+ * Create an SSE stream that sends turn-level and question-level events.
  *
- * SSE (Server-Sent Events) is a simple protocol where the server sends
- * `data: ...\n\n` lines to the client over a long-lived HTTP connection.
- * The browser's EventSource API handles reconnection automatically.
- *
- * We send three event types:
- *   - "progress": { completed, total, result } — after each question
- *   - "done": { results } — when all questions are finished
- *   - "error": { message } — if something goes wrong
+ * Event types:
+ *   - "start": { totalQuestions, totalTurns }
+ *   - "question_start": { questionIndex, questionId, questionType, totalTurns }
+ *   - "turn": { questionIndex, snapshot, turnsDone, totalTurns }
+ *   - "question_done": { questionIndex, result }
+ *   - "error": { message, questionIndex }
+ *   - "done": { results }
  */
-function createSSEStream(
-  items: EvalItem[]
-): ReadableStream<Uint8Array> {
+function createSSEStream(items: EvalItem[]): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder();
+
+  // Pre-compute total turns across all questions
+  const turnsPerQuestion = items.map(countTurnPairs);
+  const totalTurnsAll = turnsPerQuestion.reduce((a, b) => a + b, 0);
 
   return new ReadableStream({
     async start(controller) {
+      const send = (data: Record<string, unknown>) => {
+        controller.enqueue(
+          encoder.encode(`data: ${JSON.stringify(data)}\n\n`)
+        );
+      };
+
+      send({
+        type: "start",
+        totalQuestions: items.length,
+        totalTurns: totalTurnsAll,
+      });
+
       const results: EvalResult[] = [];
+      let globalTurnsDone = 0;
 
-      // Send initial event with total count
-      controller.enqueue(
-        encoder.encode(
-          `data: ${JSON.stringify({ type: "start", total: items.length })}\n\n`
-        )
-      );
+      for (let qi = 0; qi < items.length; qi++) {
+        const item = items[qi]!;
+        const questionTotalTurns = turnsPerQuestion[qi]!;
 
-      for (let i = 0; i < items.length; i++) {
+        send({
+          type: "question_start",
+          questionIndex: qi,
+          questionId: item.question_id,
+          questionType: item.question_type,
+          question: item.question,
+          totalTurns: questionTotalTurns,
+        });
+
         try {
-          const result = await evaluateQuestion(items[i]!);
+          const result = await evaluateQuestion(
+            item,
+            // onTurn callback — fires after each turn
+            (snapshot: TurnSnapshot, totalTurns: number) => {
+              globalTurnsDone++;
+              send({
+                type: "turn",
+                questionIndex: qi,
+                snapshot,
+                turnsDone: snapshot.turnIndex + 1,
+                totalTurns,
+                globalTurnsDone,
+                globalTotalTurns: totalTurnsAll,
+              });
+            }
+          );
+
           results.push(result);
 
-          controller.enqueue(
-            encoder.encode(
-              `data: ${JSON.stringify({
-                type: "progress",
-                completed: i + 1,
-                total: items.length,
-                result,
-              })}\n\n`
-            )
-          );
+          send({
+            type: "question_done",
+            questionIndex: qi,
+            completed: qi + 1,
+            total: items.length,
+            result,
+          });
         } catch (error) {
-          controller.enqueue(
-            encoder.encode(
-              `data: ${JSON.stringify({
-                type: "error",
-                message: `Failed on question ${items[i]?.question_id}: ${error}`,
-                completed: i + 1,
-                total: items.length,
-              })}\n\n`
-            )
-          );
+          send({
+            type: "error",
+            message: `Failed on question ${item.question_id}: ${error}`,
+            questionIndex: qi,
+          });
         }
       }
 
-      // Send completion event
-      controller.enqueue(
-        encoder.encode(
-          `data: ${JSON.stringify({ type: "done", results })}\n\n`
-        )
-      );
-
+      send({ type: "done", results });
       controller.close();
     },
   });
 }
 
-/** CORS headers for dev (Vite runs on a different port) */
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type",
 };
 
+const sseHeaders = {
+  ...corsHeaders,
+  "Content-Type": "text/event-stream",
+  "Cache-Control": "no-cache",
+  Connection: "keep-alive",
+};
+
 const server = Bun.serve({
   port: PORT,
+  // Eval questions can take minutes — disable idle timeout for SSE streams
+  idleTimeout: 0,
+
   async fetch(req) {
     const url = new URL(req.url);
 
-    // Handle CORS preflight
     if (req.method === "OPTIONS") {
       return new Response(null, { status: 204, headers: corsHeaders });
     }
 
-    // ── GET /api/dataset — list all questions in the dataset ──
+    // ── GET /api/dataset ──
     if (url.pathname === "/api/dataset") {
       try {
         const dataset = await getDataset();
 
-        // Return lightweight question list (no haystack sessions)
         const questions = dataset.map((item) => ({
           questionId: item.question_id,
           questionType: item.question_type,
@@ -135,7 +162,6 @@ const server = Bun.serve({
           sessionCount: item.haystack_sessions.length,
         }));
 
-        // Group by type for the frontend
         const types = [...new Set(dataset.map((i) => i.question_type))];
 
         return Response.json(
@@ -150,7 +176,7 @@ const server = Bun.serve({
       }
     }
 
-    // ── GET /api/dataset/question?id=xxx — get full question with sessions ──
+    // ── GET /api/dataset/question?id=xxx ──
     if (url.pathname === "/api/dataset/question") {
       try {
         const dataset = await getDataset();
@@ -171,15 +197,14 @@ const server = Bun.serve({
           );
         }
 
-        // Parse sessions into a cleaner structure for the frontend
         const sessions = item.haystack_sessions.map((session, idx) => {
-          const turns = Object.values(session) as { role: string; content: string }[];
+          const turns = Object.values(session) as {
+            role: string;
+            content: string;
+          }[];
           return {
             sessionIndex: idx,
-            turns: turns.map((t) => ({
-              role: t.role,
-              content: t.content,
-            })),
+            turns: turns.map((t) => ({ role: t.role, content: t.content })),
           };
         });
 
@@ -204,7 +229,7 @@ const server = Bun.serve({
       }
     }
 
-    // ── GET /api/eval/run?count=2&type=temporal-reasoning — run eval sweep ──
+    // ── GET /api/eval/run?count=2&type=... ──
     if (url.pathname === "/api/eval/run") {
       try {
         const dataset = await getDataset();
@@ -224,12 +249,7 @@ const server = Bun.serve({
         }
 
         return new Response(createSSEStream(items), {
-          headers: {
-            ...corsHeaders,
-            "Content-Type": "text/event-stream",
-            "Cache-Control": "no-cache",
-            Connection: "keep-alive",
-          },
+          headers: sseHeaders,
         });
       } catch (error) {
         return Response.json(
@@ -239,7 +259,7 @@ const server = Bun.serve({
       }
     }
 
-    // ── GET /api/eval/question?id=xxx — run a single question ──
+    // ── GET /api/eval/question?id=xxx ──
     if (url.pathname === "/api/eval/question") {
       try {
         const dataset = await getDataset();
@@ -261,12 +281,7 @@ const server = Bun.serve({
         }
 
         return new Response(createSSEStream([item]), {
-          headers: {
-            ...corsHeaders,
-            "Content-Type": "text/event-stream",
-            "Cache-Control": "no-cache",
-            Connection: "keep-alive",
-          },
+          headers: sseHeaders,
         });
       } catch (error) {
         return Response.json(
@@ -276,7 +291,6 @@ const server = Bun.serve({
       }
     }
 
-    // Unknown route
     return Response.json(
       {
         error: "Not found",
