@@ -89,15 +89,11 @@ export async function respondNode(
   }
 
   const stats = hipporag.getStats();
-  const topics = hipporag.getTopics();
 
   if (stats.passages > 0) {
     parts.push(
       `Long-term memory: ${stats.passages} passages, ${stats.entities} entities`
     );
-    if (topics.length > 0) {
-      parts.push(`Available topics: ${topics.join(", ")}`);
-    }
   }
 
   const contextBlock = parts.join("\n\n");
@@ -109,7 +105,7 @@ You have two tools:
 - **remember(query, type?, topics?)** — searches past conversations. Use type/topics filters for precise results.
 
 Types: event, decision, preference, fact, goal, plan
-Topics: use the exact names from the available topics list shown below.
+Topics: use explore_topics first to discover available topic names.
 
 How to use:
 - For simple recall: remember with a focused query

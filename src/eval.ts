@@ -360,14 +360,10 @@ export async function evaluateQuestion(
   const TOOLS = getEvalTools();
 
   const stats = hipporag.getStats();
-  const topics = hipporag.getTopics();
   const contextParts: string[] = [];
   if (conversationBuffer) contextParts.push(`Conversation:\n${conversationBuffer}`);
   if (stats.passages > 0) {
     contextParts.push(`Long-term memory: ${stats.passages} passages, ${stats.entities} entities`);
-    if (topics.length > 0) {
-      contextParts.push(`Available topics: ${topics.join(", ")}`);
-    }
   }
 
   const messages: (SystemMessage | HumanMessage | AIMessage | ToolMessage)[] = [
@@ -379,7 +375,7 @@ You have two tools:
 - **remember(query, type?, topics?)** — searches past conversations with optional filters
 
 Types: event, decision, preference, fact, goal, plan
-Topics: use exact names from the available topics list.
+Topics: use explore_topics first to discover available topic names.
 
 For counting/listing: explore_topics first, then remember with each relevant topic.
 
