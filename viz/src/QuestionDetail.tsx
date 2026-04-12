@@ -211,14 +211,17 @@ export default function QuestionDetail({ result, onBack }: Props) {
             </div>
           )}
         </div>
-      ) : (
-        <div className="detail-cards">
-          <div className="detail-card full-width">
-            <h3>Notepad Content</h3>
-            <pre>{result.notepadContent || "(empty notepad)"}</pre>
-          </div>
+      ) : null}
+
+      {/* Always show notepad content */}
+      <div className="detail-cards">
+        <div className="detail-card full-width">
+          <h3>Notepad Content</h3>
+          <pre className="notepad-content">
+            {result.notepadContent || "(empty notepad)"}
+          </pre>
         </div>
-      )}
+      </div>
 
       {result.conversationBuffer && (
         <div className="detail-cards">

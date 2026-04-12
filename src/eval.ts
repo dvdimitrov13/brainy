@@ -439,7 +439,12 @@ Call write_notes to save important information, then respond briefly.`
 
       pendingExchanges = [];
     }
+    // Generate rolling summary before resetting buffer
+    if (conversationBuffer) {
+      await notepad.updateRollingSummary(conversationBuffer);
+    }
     conversationBuffer = "";
+    notepad.resetReadTracking();
     notepad.newSession();
   }
 

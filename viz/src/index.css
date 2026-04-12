@@ -475,6 +475,13 @@ body {
   overflow-y: auto;
 }
 
+.notepad-content {
+  font-size: 0.8rem;
+  line-height: 1.6;
+  max-height: 500px;
+  overflow-y: auto;
+}
+
 /* ── Turn timeline ── */
 
 .timeline-section {
