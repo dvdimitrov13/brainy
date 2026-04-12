@@ -88,15 +88,15 @@ export class CompactMemory {
     const response = await llmFast.invoke([
       {
         role: "system" as const,
-        content: `You compress a conversation buffer into a compact summary paragraph.
-Preserve ALL important information: facts, names, preferences, decisions, plans,
-emotional tone, and the narrative thread. Be concise but thorough — this summary
-replaces the original text, so anything you drop is lost.
+        content: `You compress a conversation buffer into a compact summary.
+Keep it under 3-4 sentences. Preserve the most important information:
+key facts, names, numbers, preferences, decisions, and plans.
+This summary replaces the original text, so anything you drop is lost.
+However, detailed conversation content is also stored in long-term memory
+separately — so focus on the narrative thread and context that helps
+understand what comes next, not on exhaustive detail.
 
-Focus on WHAT was discussed, WHO was mentioned, and any specific details
-(numbers, dates, names, preferences) that would be important to recall later.
-
-Respond with ONLY the summary paragraph, nothing else.`,
+Respond with ONLY the summary, nothing else.`,
       },
       {
         role: "user" as const,
