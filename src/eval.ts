@@ -68,7 +68,7 @@ export interface TurnSnapshot {
 
 /** A single tool call made by the agent during retrieval */
 export interface ToolCallTrace {
-  tool: "recognize" | "recall";
+  tool: "remember";
   query: string;
   result: string;
   durationMs: number;
@@ -333,48 +333,28 @@ export async function evaluateQuestion(
 
   // ── Agent-driven retrieval + answer generation ──
   // Same tool-calling loop as the live agent. The LLM decides whether
-  // to recognize/recall based on the question and conversation context.
+  // to call remember based on the question and conversation context.
 
-  const TOOLS = [
-    {
-      type: "function" as const,
-      function: {
-        name: "recognize",
-        description:
-          "Search long-term memory for relevant entity associations. " +
-          "Returns relationship triples. Use first to check what you remember.",
-        parameters: {
-          type: "object" as const,
-          properties: {
-            query: {
-              type: "string" as const,
-              description: "A focused query to search memory associations.",
-            },
+  const REMEMBER_TOOL = {
+    type: "function" as const,
+    function: {
+      name: "remember",
+      description:
+        "Search long-term memory for relevant information. " +
+        "Finds entity associations and retrieves full conversation summaries " +
+        "from past sessions. Pass a focused, specific query.",
+      parameters: {
+        type: "object" as const,
+        properties: {
+          query: {
+            type: "string" as const,
+            description: "A focused query to search memory for.",
           },
-          required: ["query"],
         },
+        required: ["query"],
       },
     },
-    {
-      type: "function" as const,
-      function: {
-        name: "recall",
-        description:
-          "Retrieve full conversation summaries from long-term memory. " +
-          "Use after recognize to get actual details.",
-        parameters: {
-          type: "object" as const,
-          properties: {
-            query: {
-              type: "string" as const,
-              description: "The query to search long-term memory for.",
-            },
-          },
-          required: ["query"],
-        },
-      },
-    },
-  ];
+  };
 
   const memoryParts: string[] = [];
   if (conversationBuffer) {
@@ -386,28 +366,23 @@ export async function evaluateQuestion(
     new SystemMessage(
       `You are a helpful, friendly assistant with long-term memory.
 
-You have two memory tools:
-1. **recognize** — search for entity associations in memory. Returns relationship triples.
-2. **recall** — retrieve full conversation summaries. Use after recognize to get details.
+You have a memory tool: **remember** — searches past conversations for relevant information. Use it when the user asks about something from the past. For casual conversation, just respond directly.
 
-If the user asks about something from the past, first recognize to find associations, then recall to get the details. For casual conversation, just respond directly.
-
-Do NOT mention your memory tools or system. Just respond naturally.
+Do NOT mention your memory tool or system. Just respond naturally.
 
 ${memoryBlock ? `--- Current Session ---\n${memoryBlock}\n--- End Session ---` : "(New conversation — no prior context.)"}`
     ),
     new HumanMessage(item.question),
   ];
 
-  let lastRecognizedTriples: import("./hipporag/types.ts").Triple[] = [];
   const toolCallTraces: ToolCallTrace[] = [];
   const retrievalStart = Date.now();
 
-  const maxToolCalls = 5;
+  const maxToolCalls = 3;
   let generatedAnswer = "";
 
   for (let i = 0; i < maxToolCalls; i++) {
-    const response = await llm.invoke(messages, { tools: TOOLS });
+    const response = await llm.invoke(messages, { tools: [REMEMBER_TOOL] });
 
     const toolCalls = response.tool_calls;
 
@@ -425,38 +400,12 @@ ${memoryBlock ? `--- Current Session ---\n${memoryBlock}\n--- End Session ---` :
     messages.push(response);
 
     for (const toolCall of toolCalls) {
-      const query = (toolCall.args as { query: string }).query;
-      const callStart = Date.now();
+      if (toolCall.name === "remember") {
+        const query = (toolCall.args as { query: string }).query;
+        const callStart = Date.now();
 
-      if (toolCall.name === "recognize") {
-        const triples = await hipporag.recognize(query);
-        lastRecognizedTriples = triples;
-
-        const result =
-          triples.length > 0
-            ? triples
-                .map(
-                  (t, idx) =>
-                    `${idx + 1}. (${t.subject}, ${t.predicate}, ${t.object})`
-                )
-                .join("\n")
-            : "No relevant associations found in memory.";
-
-        toolCallTraces.push({
-          tool: "recognize",
-          query,
-          result,
-          durationMs: Date.now() - callStart,
-        });
-
-        messages.push(
-          new ToolMessage({
-            tool_call_id: toolCall.id ?? `call_${i}`,
-            content: result,
-          })
-        );
-      } else if (toolCall.name === "recall") {
-        const passages = await hipporag.recall(query, lastRecognizedTriples);
+        // Full pipeline: recognize (top-25 + LLM filter) → recall (PPR)
+        const passages = await hipporag.retrieve(query);
 
         const result =
           passages.length > 0
@@ -466,7 +415,7 @@ ${memoryBlock ? `--- Current Session ---\n${memoryBlock}\n--- End Session ---` :
             : "No relevant memories found.";
 
         toolCallTraces.push({
-          tool: "recall",
+          tool: "remember",
           query,
           result,
           durationMs: Date.now() - callStart,
@@ -509,7 +458,6 @@ ${memoryBlock ? `--- Current Session ---\n${memoryBlock}\n--- End Session ---` :
     generatedAnswer,
     correct,
     retrievedContext: toolCallTraces
-      .filter((t) => t.tool === "recall")
       .map((t) => t.result)
       .join("\n\n"),
     conversationBuffer,

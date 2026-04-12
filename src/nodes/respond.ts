@@ -1,18 +1,14 @@
 /**
  * respond.ts — LangGraph node that generates the AI response.
  *
- * The agent has two memory tools:
+ * The agent has one memory tool: `remember`. When called, it runs
+ * the full HippoRAG pipeline:
+ *   1. Recognize — find top-25 triples by cosine similarity, LLM filters
+ *   2. Recall — PPR over the knowledge graph using filtered triples as seeds
+ *   3. Return passage summaries
  *
- *   1. recognize — surface entity associations from long-term memory.
- *      The agent formulates a contextualized query, gets back triples
- *      (lightweight connections between entities).
- *
- *   2. recall — retrieve full passage summaries from long-term memory.
- *      Uses the triples from recognize as seeds for PPR over the
- *      knowledge graph. Returns dense exchange summaries.
- *
- * No memory is injected automatically — the agent decides when to
- * search its memory based on the conversation context.
+ * The agent decides when to use it based on the conversation context.
+ * For casual chat it responds directly without calling the tool.
  *
  * Graph position: START → [respond] → memorize → END
  */
@@ -26,24 +22,24 @@ import {
 import type { BrainyState } from "../state.ts";
 import { llm } from "../llm.ts";
 import { hipporag } from "../singletons.ts";
-import type { Triple } from "../hipporag/types.ts";
 
-const RECOGNIZE_TOOL = {
+const REMEMBER_TOOL = {
   type: "function" as const,
   function: {
-    name: "recognize",
+    name: "remember",
     description:
-      "Search long-term memory for relevant entity associations. " +
-      "Returns relationship triples (subject, predicate, object) that " +
-      "connect to your query. Use this first to check what you might " +
-      "remember about a topic. Pass a focused, contextualized query.",
+      "Search long-term memory for relevant information. " +
+      "Finds entity associations and retrieves full conversation summaries " +
+      "from past sessions. Use when the user asks about something from " +
+      "the past or you need context from prior conversations. " +
+      "Pass a focused, specific query.",
     parameters: {
       type: "object" as const,
       properties: {
         query: {
           type: "string" as const,
           description:
-            "A focused query to search memory associations. " +
+            "A focused query to search memory for. " +
             "Be specific — e.g., 'user\\'s 5K race time' not 'running'.",
         },
       },
@@ -52,43 +48,12 @@ const RECOGNIZE_TOOL = {
   },
 };
 
-const RECALL_TOOL = {
-  type: "function" as const,
-  function: {
-    name: "recall",
-    description:
-      "Retrieve full conversation summaries from long-term memory. " +
-      "Use AFTER recognize — this does a deep search using the " +
-      "associations found. Returns the actual conversation content " +
-      "as dense summaries. Pass the same or refined query.",
-    parameters: {
-      type: "object" as const,
-      properties: {
-        query: {
-          type: "string" as const,
-          description:
-            "The query to search long-term memory for. " +
-            "Usually the same query used for recognize, or a refined version.",
-        },
-      },
-      required: ["query"],
-    },
-  },
-};
-
-const TOOLS = [RECOGNIZE_TOOL, RECALL_TOOL];
-
 /**
- * Generate an AI response with access to memory tools.
- *
- * The agent decides whether to use recognize/recall based on
- * the conversation context. Tool calls are handled in a loop
- * until the agent produces a final text response.
+ * Generate an AI response with access to the remember tool.
  */
 export async function respondNode(
   state: typeof BrainyState.State
 ): Promise<Partial<typeof BrainyState.State>> {
-  // ── Build system prompt ──
   const memoryParts: string[] = [];
 
   if (state.conversationBuffer) {
@@ -101,34 +66,27 @@ export async function respondNode(
 
   const systemPrompt = `You are a helpful, friendly assistant with long-term memory.
 
-You have two memory tools:
-1. **recognize** — search for entity associations in memory. Returns relationship triples. Use this to check if you remember something relevant.
-2. **recall** — retrieve full conversation summaries. Use after recognize to get the actual details. Uses the associations found to do a deep search.
+You have a memory tool: **remember** — searches past conversations for relevant information. Use it when the user asks about something from the past or you need context from prior conversations. For casual conversation, just respond directly.
 
-Workflow: if the user asks about something from the past, first recognize to find associations, then recall to get the details. For casual conversation or topics you don't need memory for, just respond directly.
-
-Do NOT mention your memory tools or system. Just respond naturally.
+Do NOT mention your memory tool or system. Just respond naturally.
 
 ${memoryBlock ? `--- Current Session ---\n${memoryBlock}\n--- End Session ---` : "(New conversation — no prior context in this session.)"}`;
 
-  // ── Tool-calling loop ──
   const messages: (SystemMessage | HumanMessage | AIMessage | ToolMessage)[] = [
     new SystemMessage(systemPrompt),
     new HumanMessage(state.userMessage),
   ];
 
-  // Track triples from recognize for use in recall
-  let lastRecognizedTriples: Triple[] = [];
-
-  const maxToolCalls = 5; // Safety limit
+  const maxToolCalls = 3;
 
   for (let i = 0; i < maxToolCalls; i++) {
-    const response = await llm.invoke(messages, { tools: TOOLS });
+    const response = await llm.invoke(messages, {
+      tools: [REMEMBER_TOOL],
+    });
 
     const toolCalls = response.tool_calls;
 
     if (!toolCalls || toolCalls.length === 0) {
-      // Final response — no more tool calls
       const aiResponse =
         typeof response.content === "string"
           ? response.content
@@ -140,38 +98,14 @@ ${memoryBlock ? `--- Current Session ---\n${memoryBlock}\n--- End Session ---` :
       return { aiResponse };
     }
 
-    // Execute tool calls
     messages.push(response);
 
     for (const toolCall of toolCalls) {
-      const query = (toolCall.args as { query: string }).query;
+      if (toolCall.name === "remember") {
+        const query = (toolCall.args as { query: string }).query;
 
-      if (toolCall.name === "recognize") {
-        const triples = await hipporag.recognize(query);
-        lastRecognizedTriples = triples;
-
-        const result =
-          triples.length > 0
-            ? triples
-                .map(
-                  (t, idx) =>
-                    `${idx + 1}. (${t.subject}, ${t.predicate}, ${t.object})`
-                )
-                .join("\n")
-            : "No relevant associations found in memory.";
-
-        messages.push(
-          new ToolMessage({
-            tool_call_id: toolCall.id ?? `call_${i}`,
-            content: result,
-          })
-        );
-      } else if (toolCall.name === "recall") {
-        // Use triples from the last recognize call as PPR seeds
-        const passages = await hipporag.recall(
-          query,
-          lastRecognizedTriples
-        );
+        // Full pipeline: recognize (top-25 + LLM filter) → recall (PPR)
+        const passages = await hipporag.retrieve(query);
 
         const result =
           passages.length > 0
@@ -190,7 +124,6 @@ ${memoryBlock ? `--- Current Session ---\n${memoryBlock}\n--- End Session ---` :
     }
   }
 
-  // Exhausted tool call limit — extract whatever we have
   const lastMsg = messages[messages.length - 1];
   const fallback =
     lastMsg instanceof AIMessage

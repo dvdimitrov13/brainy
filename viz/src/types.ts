@@ -14,7 +14,7 @@ export interface TurnSnapshot {
 
 /** A single tool call the agent made */
 export interface ToolCallTrace {
-  tool: "recognize" | "recall";
+  tool: "remember";
   query: string;
   result: string;
   durationMs: number;
