@@ -203,18 +203,19 @@ export default function QuestionDetail({ result, onBack }: Props) {
         </div>
       </div>
 
-      {/* Two-phase retrieval pipeline visualization */}
+      {/* Two-tool retrieval pipeline visualization */}
       {result.retrieval ? (
         <div className="retrieval-pipeline">
-          <h3>Retrieval Pipeline</h3>
+          <h3>Memory Retrieval</h3>
 
           <div className="pipeline-phase">
             <div className="phase-header">
-              <span className="phase-label">Phase 1: Triple Associations</span>
+              <span className="phase-label">recognize()</span>
+              <span className="phase-desc">Entity associations (cosine &ge; 0.8 + LLM filter)</span>
               <span className="phase-timing">
                 {result.retrieval.tripleRetrievalMs}ms
               </span>
-              <span className="phase-auto-badge">automatic</span>
+              <span className="phase-tool-badge">tool</span>
             </div>
             {result.retrieval.triples.length > 0 ? (
               <div className="triple-list">
@@ -227,33 +228,31 @@ export default function QuestionDetail({ result, onBack }: Props) {
                 ))}
               </div>
             ) : (
-              <div className="phase-empty">No relevant triples found</div>
+              <div className="phase-empty">No associations above threshold</div>
             )}
           </div>
 
           <div className="pipeline-arrow">
             {result.retrieval.triples.length > 0
-              ? "Agent calls recall_memory tool"
+              ? "Triples seed PPR graph search"
               : "Fallback to dense passage retrieval"}
           </div>
 
           <div className="pipeline-phase">
             <div className="phase-header">
-              <span className="phase-label">Phase 2: Recall Summaries (PPR)</span>
+              <span className="phase-label">recall()</span>
+              <span className="phase-desc">Passage summaries via PPR (score &ge; 20% of top)</span>
               <span className="phase-timing">
                 {result.retrieval.passageRetrievalMs}ms
               </span>
-              <span className="phase-tool-badge">tool call</span>
+              <span className="phase-tool-badge">tool</span>
             </div>
             {result.retrieval.passages.length > 0 ? (
               <div className="passage-list">
                 {result.retrieval.passages.map((p, i) => (
                   <div key={i} className="passage-item">
                     <span className="passage-idx">{i + 1}</span>
-                    <span className="passage-text">
-                      {p.text.slice(0, 200)}
-                      {p.text.length > 200 ? "..." : ""}
-                    </span>
+                    <span className="passage-text">{p.text}</span>
                   </div>
                 ))}
               </div>
