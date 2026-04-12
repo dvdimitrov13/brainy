@@ -2,17 +2,15 @@
  * respond.ts — LangGraph node that generates the AI response.
  *
  * This node assembles the prompt from memory context and calls the LLM.
- * Crucially, it uses ONLY:
+ * The prompt includes:
  *   - System prompt with injected memories
- *   - The current user message (singular — no history!)
+ *   - The conversation buffer (real turns or compressed summary)
+ *   - The current user message
  *
- * This is the "always turn 1" design: the LLM sees no prior messages.
- * All continuity comes from the compact summary and retrieved passages
- * that are injected into the system prompt.
- *
- * The prompt stays under ~3.5K tokens regardless of conversation length
- * because the compact summary is always one sentence and we retrieve
- * at most 3 passages.
+ * The conversation buffer gives the LLM real message history when
+ * turns are recent (under memory pressure threshold), and compressed
+ * summaries for older history. HippoRAG passages supplement this
+ * with relevant long-term memories retrieved via graph search.
  *
  * Graph position: START → retrieve → [respond] → memorize → END
  */
@@ -34,16 +32,16 @@ export async function respondNode(
   // Only include sections that have content (avoid empty blocks)
   const memoryParts: string[] = [];
 
-  if (state.compactSummary) {
-    memoryParts.push(`Conversation summary: ${state.compactSummary}`);
-  }
-
-  if (state.metaSummary) {
-    memoryParts.push(`Overall narrative: ${state.metaSummary}`);
+  if (state.conversationBuffer) {
+    memoryParts.push(
+      `Conversation so far:\n${state.conversationBuffer}`
+    );
   }
 
   if (state.retrievedContext) {
-    memoryParts.push(`Relevant memories:\n${state.retrievedContext}`);
+    memoryParts.push(
+      `Relevant long-term memories:\n${state.retrievedContext}`
+    );
   }
 
   const memoryBlock = memoryParts.join("\n\n");
@@ -57,8 +55,7 @@ Just respond naturally as if you remember the conversation yourself.
 
 ${memoryBlock ? `--- Your Memories ---\n${memoryBlock}\n--- End Memories ---` : "(No memories stored yet — this is the beginning of the conversation.)"}`;
 
-  // ── Call the LLM with ONLY system prompt + current user message ──
-  // No message history! This is the "always turn 1" design.
+  // ── Call the LLM with system prompt + current user message ──
   const response = await llm.invoke([
     new SystemMessage(systemPrompt),
     new HumanMessage(state.userMessage),

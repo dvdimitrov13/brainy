@@ -5,17 +5,20 @@
  * In LangGraph, state is the central concept: every node reads from
  * state and returns partial updates to it.
  *
- * CRITICAL DESIGN DECISION: No message accumulation!
+ * CRITICAL DESIGN DECISION: Pressure-based memory!
  *
- * Unlike a typical chatbot that accumulates all messages in state,
- * this agent always stays on "turn 1". Each invocation only has:
- *   - The current user message
- *   - The current AI response
- *   - Memory context injected from the two memory stores
+ * Instead of always summarizing after every turn (lossy from turn 1),
+ * we accumulate real conversation turns in a buffer. The LLM sees
+ * actual messages until the buffer exceeds a token threshold (~1024
+ * tokens), at which point we:
+ *   1. Summarize the buffer into a compact paragraph
+ *   2. Index the summary into HippoRAG for long-term retrieval
+ *   3. Replace the buffer with the summary
  *
- * ALL continuity comes from the memory stores (compact summary +
- * HippoRAG vector memory), NOT from message history. This is what
- * keeps the prompt under ~3.5K tokens regardless of conversation length.
+ * This means early turns get full fidelity, and compression only
+ * happens when memory pressure forces it — matching how human
+ * short-term memory works (you remember recent events in detail,
+ * older ones as gist).
  *
  * TS note for Python devs:
  *   `Annotation.Root({ ... })` is LangGraph's way of defining a typed
@@ -34,7 +37,7 @@ import { Annotation } from "@langchain/langgraph";
 export const BrainyState = Annotation.Root({
   /**
    * The current user message (overwritten each turn).
-   * This is the ONLY user input — no history accumulates.
+   * This is the ONLY user input — no history accumulates here.
    */
   userMessage: Annotation<string>({
     reducer: (_prev, next) => next, // always overwrite
@@ -50,19 +53,20 @@ export const BrainyState = Annotation.Root({
   }),
 
   /**
-   * The one-sentence compact summary of the entire conversation.
-   * Updated by the memorize node after each turn.
+   * The conversation buffer — real turns or a compressed summary.
+   *
+   * Starts empty, accumulates "User: ...\nAssistant: ..." entries.
+   * When the buffer exceeds TOKEN_THRESHOLD (~1024 tokens), the
+   * memorize node summarizes it and replaces the contents with
+   * a compact summary paragraph. This summary then becomes the
+   * base that new turns accumulate on top of, until the next
+   * compression cycle.
+   *
+   * The LLM always sees this buffer as its conversation context,
+   * so it gets full-fidelity recent turns mixed with compressed
+   * older history.
    */
-  compactSummary: Annotation<string>({
-    reducer: (_prev, next) => next,
-    default: () => "",
-  }),
-
-  /**
-   * The second-level "summary of summaries".
-   * Updated every ~10 turns to correct for drift in incremental summarisation.
-   */
-  metaSummary: Annotation<string>({
+  conversationBuffer: Annotation<string>({
     reducer: (_prev, next) => next,
     default: () => "",
   }),
@@ -78,7 +82,6 @@ export const BrainyState = Annotation.Root({
 
   /**
    * Conversation turn counter.
-   * Used to schedule the periodic summary-of-summaries (every 10 turns).
    */
   turnCount: Annotation<number>({
     reducer: (_prev, next) => next,

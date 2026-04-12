@@ -1,142 +1,110 @@
 /**
- * compact-memory.ts — Continuously updated one-sentence conversation summary.
+ * compact-memory.ts — Pressure-based conversation buffer with summarization.
  *
- * This implements the "Compact Memory" from the paper — a single sentence
- * that captures the global narrative thread of the conversation. It's
- * updated after every turn by asking the LLM to integrate the new exchange
- * into the existing summary.
+ * Instead of summarizing every turn (lossy from turn 1), this module
+ * accumulates real conversation turns and only compresses when the
+ * buffer exceeds a token threshold. This preserves full fidelity for
+ * recent exchanges while keeping memory bounded.
  *
- * The key challenge with incremental summarisation is "cascade errors" —
- * small inaccuracies compound over hundreds of turns (like the telephone
- * game). The paper solves this with a "two-level summary-of-summaries":
- * periodically, instead of updating the summary incrementally, we
- * re-derive it from a buffer of recent summaries. This corrects drift.
+ * The flow:
+ *   1. Each turn, `append()` adds the new exchange to the buffer
+ *   2. `shouldSummarize()` checks if the buffer exceeds the token limit
+ *   3. If yes, `summarize()` compresses the entire buffer into a
+ *      compact paragraph and returns it as the new buffer contents
+ *   4. At summarization time, the caller also indexes the summary
+ *      into HippoRAG for long-term retrieval
  *
- * Brain analogy: Compact Memory is like the brain's "gist memory" —
- * you remember the general storyline of a movie even if you forget
- * specific scenes.
+ * Brain analogy: This is like short-term / working memory. You hold
+ * recent events in full detail, but older events get compressed into
+ * gist as new information competes for the same limited capacity.
  *
  * TS note for Python devs:
- *   - `private` fields like `summaryHistory` are class-level variables
+ *   - `private` fields like `TOKEN_THRESHOLD` are class-level constants
  *     that can't be accessed outside the class (Python uses _ prefix).
- *   - `async/await` works identically to Python's asyncio.
+ *   - Template literals (`${var}`) are like Python f-strings.
  */
 
 import { llmFast } from "../llm.ts";
 
+/**
+ * Rough token count estimate.
+ *
+ * LLMs use subword tokenizers (BPE), so there's no exact char-to-token
+ * mapping. The common heuristic is ~4 characters per token for English.
+ * We use this for the memory pressure check — it doesn't need to be
+ * exact, just close enough to trigger summarization at the right time.
+ *
+ * @param text — the text to estimate tokens for
+ * @returns approximate token count
+ */
+function estimateTokens(text: string): number {
+  return Math.ceil(text.length / 4);
+}
+
+/** Token threshold before summarization kicks in */
+const TOKEN_THRESHOLD = 1024;
+
 export class CompactMemory {
   /**
-   * Rolling buffer of past summaries.
+   * Check if the conversation buffer has exceeded memory pressure.
    *
-   * Every time `update()` is called, the new summary is pushed here.
-   * This buffer is used by `generateMetaSummary()` to re-derive a
-   * fresh summary, correcting any drift from incremental updates.
-   *
-   * Python equivalent: list[str]
+   * @param buffer — the current conversation buffer text
+   * @returns true if the buffer should be summarized
    */
-  private summaryHistory: string[] = [];
-
-  /**
-   * Update the compact summary with a new conversation exchange.
-   *
-   * Takes the current summary and the new user+assistant exchange,
-   * then asks the LLM to produce an updated one-sentence summary
-   * that integrates the new information.
-   *
-   * @param currentSummary — the existing one-sentence summary (or "" if first turn)
-   * @param newExchange    — the new conversation text to integrate
-   * @returns the updated one-sentence summary
-   */
-  async update(currentSummary: string, newExchange: string): Promise<string> {
-    const response = await llmFast.invoke([
-      {
-        role: "system" as const,
-        content: `You maintain a single-sentence summary of an ongoing conversation.
-Given the current summary and a new exchange, produce an updated one-sentence summary
-that preserves the most important narrative thread. Be concise but capture key facts,
-decisions, and emotional tone. Focus on WHAT was discussed and any important details.
-
-If the current summary is empty, create one from the new exchange alone.
-
-Respond with ONLY the updated summary sentence, nothing else.`,
-      },
-      {
-        role: "user" as const,
-        content: `Current summary: ${currentSummary || "(conversation just started)"}
-
-New exchange:
-${newExchange}
-
-Updated one-sentence summary:`,
-      },
-    ]);
-
-    // Extract text from the response
-    const newSummary =
-      typeof response.content === "string"
-        ? response.content.trim()
-        : (response.content as Array<{ type: string; text?: string }>)
-            .filter((block) => block.type === "text")
-            .map((block) => block.text ?? "")
-            .join("")
-            .trim();
-
-    // Store in history for future meta-summary generation
-    this.summaryHistory.push(newSummary);
-
-    return newSummary;
+  shouldSummarize(buffer: string): boolean {
+    return estimateTokens(buffer) > TOKEN_THRESHOLD;
   }
 
   /**
-   * Generate a "summary of summaries" to correct drift.
+   * Append a new exchange to the conversation buffer.
    *
-   * This is the TWO-LEVEL mechanism from the paper. Instead of only
-   * doing summary(prev + new) every turn, we periodically take the
-   * buffer of recent summaries and re-derive a fresh summary.
+   * Simply concatenates the new exchange onto the existing buffer
+   * with a separator. No LLM call needed — this is just accumulation.
    *
-   * Why this matters:
-   *   - Incremental summarisation is like the "telephone game"
-   *   - Small errors compound: after 100 turns, the summary may have
-   *     drifted significantly from the true conversation content
-   *   - By re-summarising from the HISTORY of summaries (which were
-   *     each close to accurate when created), we get a more accurate
-   *     global picture
-   *
-   * The paper shows this eliminates cascade errors that emerge after
-   * ~1,000 turns.
-   *
-   * @param currentSummary — the current one-sentence summary
-   * @returns a fresh, consolidated summary
+   * @param currentBuffer — the existing buffer content
+   * @param newExchange   — the new "User: ...\nAssistant: ..." text
+   * @returns the updated buffer with the new exchange appended
    */
-  async generateMetaSummary(currentSummary: string): Promise<string> {
-    // Need at least a few summaries to do meaningful consolidation
-    if (this.summaryHistory.length < 3) return currentSummary;
+  append(currentBuffer: string, newExchange: string): string {
+    if (!currentBuffer) return newExchange;
+    return `${currentBuffer}\n\n${newExchange}`;
+  }
 
-    // Take the most recent summaries (cap at 10 to keep prompt small)
-    const recentSummaries = this.summaryHistory.slice(-10);
-
+  /**
+   * Summarize the conversation buffer under memory pressure.
+   *
+   * Compresses the entire buffer into a compact paragraph that
+   * preserves the key facts, decisions, preferences, and narrative
+   * arc. This is only called when the buffer exceeds TOKEN_THRESHOLD.
+   *
+   * Unlike the old approach (summarize every turn into one sentence),
+   * this produces a richer summary because it has access to the full
+   * multi-turn context at compression time.
+   *
+   * @param buffer — the full conversation buffer to compress
+   * @returns a compact summary paragraph
+   */
+  async summarize(buffer: string): Promise<string> {
     const response = await llmFast.invoke([
       {
         role: "system" as const,
-        content: `You are given a sequence of conversation summaries taken at different points in time.
-Each summary captures the state of the conversation at that moment.
+        content: `You compress a conversation buffer into a compact summary paragraph.
+Preserve ALL important information: facts, names, preferences, decisions, plans,
+emotional tone, and the narrative thread. Be concise but thorough — this summary
+replaces the original text, so anything you drop is lost.
 
-Synthesize them into a single accurate one-sentence summary of the entire conversation so far.
-This is a "summary of summaries" to correct for drift in incremental summarization.
-Focus on the overall narrative arc and the most important facts/decisions.
+Focus on WHAT was discussed, WHO was mentioned, and any specific details
+(numbers, dates, names, preferences) that would be important to recall later.
 
-Respond with ONLY the consolidated summary sentence, nothing else.`,
+Respond with ONLY the summary paragraph, nothing else.`,
       },
       {
         role: "user" as const,
-        content: `Summary history (oldest to newest):
-${recentSummaries.map((s, i) => `${i + 1}. ${s}`).join("\n")}
-
-Fresh consolidated summary:`,
+        content: `Conversation buffer to compress:\n\n${buffer}`,
       },
     ]);
 
-    const metaSummary =
+    const summary =
       typeof response.content === "string"
         ? response.content.trim()
         : (response.content as Array<{ type: string; text?: string }>)
@@ -145,10 +113,6 @@ Fresh consolidated summary:`,
             .join("")
             .trim();
 
-    // Reset history to prevent unbounded growth
-    // Keep only the meta-summary as the starting point for the next cycle
-    this.summaryHistory = [metaSummary];
-
-    return metaSummary;
+    return `[Summary of earlier conversation]\n${summary}`;
   }
 }

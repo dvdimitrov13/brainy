@@ -37,7 +37,8 @@ async function main() {
   const graph = buildGraph();
 
   // Persistent state that carries across turns
-  // (only summaries and turn count — no message accumulation!)
+  // (conversation buffer + turn count — buffer holds real turns until
+  // memory pressure triggers summarization)
   let currentState: Record<string, unknown> = {};
 
   // Set up readline for terminal input
@@ -93,8 +94,10 @@ async function main() {
         console.log(`Facts stored:     ${stats.facts}`);
         console.log(`Graph nodes:      ${stats.graphNodes}`);
         console.log(`Turn count:       ${(currentState.turnCount as number) ?? 0}`);
-        console.log(`Compact summary:  ${(currentState.compactSummary as string) || "(none yet)"}`);
-        console.log(`Meta summary:     ${(currentState.metaSummary as string) || "(none yet)"}`);
+        const buf = (currentState.conversationBuffer as string) || "";
+        const bufTokens = Math.ceil(buf.length / 4);
+        console.log(`Buffer tokens:    ~${bufTokens} / 1024`);
+        console.log(`Buffer preview:   ${buf.slice(0, 200) || "(empty)"}${buf.length > 200 ? "..." : ""}`);
         console.log("---\n");
         askQuestion();
         return;
@@ -109,12 +112,11 @@ async function main() {
         });
 
         // Update our persistent state for the next turn
-        // We carry forward: compactSummary, metaSummary, turnCount
+        // We carry forward: conversationBuffer, turnCount
         // We do NOT carry: userMessage, aiResponse, retrievedContext
         // (those are per-turn and get overwritten)
         currentState = {
-          compactSummary: result.compactSummary,
-          metaSummary: result.metaSummary,
+          conversationBuffer: result.conversationBuffer,
           turnCount: result.turnCount,
         };
 

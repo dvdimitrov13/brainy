@@ -196,7 +196,7 @@ interface TurnResult {
   phase: string;
   input: string;
   response: string;
-  compactSummary: string;
+  conversationBuffer: string;
   retrievedContext: string;
   stats: { passages: number; entities: number; facts: number; graphNodes: number };
   recallScore?: { matched: string[]; missed: string[]; score: number };
@@ -224,8 +224,7 @@ async function runTest() {
     });
 
     state = {
-      compactSummary: result.compactSummary,
-      metaSummary: result.metaSummary,
+      conversationBuffer: result.conversationBuffer,
       turnCount: result.turnCount,
     };
 
@@ -237,7 +236,7 @@ async function runTest() {
       phase,
       input: input.slice(0, 80) + (input.length > 80 ? "..." : ""),
       response: result.aiResponse as string,
-      compactSummary: result.compactSummary as string,
+      conversationBuffer: result.conversationBuffer as string,
       retrievedContext: (result.retrievedContext as string) || "(none)",
       stats,
     };
@@ -367,11 +366,12 @@ async function runTest() {
   console.log(`  Facts:       ${finalStats.facts}`);
   console.log(`  Graph nodes: ${finalStats.graphNodes}`);
 
-  // Compact memory final state
-  console.log(`\nFinal Compact Summary:\n  "${state.compactSummary}"`);
-  if (state.metaSummary) {
-    console.log(`\nMeta Summary:\n  "${state.metaSummary}"`);
-  }
+  // Conversation buffer final state
+  const buf = (state.conversationBuffer as string) || "";
+  const bufTokens = Math.ceil(buf.length / 4);
+  console.log(`\nConversation Buffer (~${bufTokens} tokens):`);
+  console.log(`  "${buf.slice(0, 300)}${buf.length > 300 ? "..." : ""}"`);
+
 
   console.log("\n━━━ EVALUATION COMPLETE ━━━\n");
 }

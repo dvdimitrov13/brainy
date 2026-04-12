@@ -23,7 +23,7 @@ import { CompactMemory } from "./memory/compact-memory.ts";
 /** The HippoRAG2 vector memory system (knowledge graph + PPR retrieval) */
 export let hipporag = new HippoRAG();
 
-/** The compact memory system (one-sentence summary + summary-of-summaries) */
+/** The compact memory system (pressure-based buffer with summarization) */
 export let compactMemory = new CompactMemory();
 
 /**

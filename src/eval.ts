@@ -172,9 +172,11 @@ async function evaluateQuestion(item: EvalItem): Promise<EvalResult> {
   // ── Step 1: Fresh memory instances ──
   const hipporag = new HippoRAG();
   const compactMemory = new CompactMemory();
-  let compactSummary = "";
+  let conversationBuffer = "";
 
   // ── Step 2: Index all sessions ──
+  // Accumulate turns in the buffer. When buffer exceeds token threshold,
+  // summarize + index into HippoRAG (same as the live agent).
   const indexStart = Date.now();
 
   for (let sessIdx = 0; sessIdx < item.haystack_sessions.length; sessIdx++) {
@@ -182,7 +184,7 @@ async function evaluateQuestion(item: EvalItem): Promise<EvalResult> {
     // Sessions are objects with numeric string keys, not arrays
     const turns = Object.values(session) as Turn[];
 
-    // Pair up user/assistant turns into exchanges and index them
+    // Pair up user/assistant turns into exchanges
     for (let t = 0; t < turns.length; t += 2) {
       const userTurn = turns[t];
       const assistantTurn = turns[t + 1];
@@ -195,15 +197,27 @@ async function evaluateQuestion(item: EvalItem): Promise<EvalResult> {
         exchangeText += `\nAssistant: ${assistantTurn.content}`;
       }
 
-      // Index in HippoRAG (extract triples, embed, add to KG)
-      // and update compact memory in parallel
-      const [newSummary] = await Promise.all([
-        compactMemory.update(compactSummary, exchangeText),
-        hipporag.index(exchangeText),
-      ]);
+      // Append to buffer
+      conversationBuffer = compactMemory.append(
+        conversationBuffer,
+        exchangeText
+      );
 
-      compactSummary = newSummary;
+      // Check memory pressure — summarize + index when buffer is too large
+      if (compactMemory.shouldSummarize(conversationBuffer)) {
+        const [summary] = await Promise.all([
+          compactMemory.summarize(conversationBuffer),
+          hipporag.index(conversationBuffer),
+        ]);
+        conversationBuffer = summary;
+        hipporag.forget();
+      }
     }
+  }
+
+  // Index any remaining buffer content that didn't trigger pressure
+  if (conversationBuffer && !conversationBuffer.startsWith("[Summary")) {
+    await hipporag.index(conversationBuffer);
   }
 
   const indexingTimeMs = Date.now() - indexStart;
@@ -219,8 +233,10 @@ async function evaluateQuestion(item: EvalItem): Promise<EvalResult> {
 
   // ── Step 4: Generate answer ──
   const memoryBlock = [
-    compactSummary && `Conversation summary: ${compactSummary}`,
-    retrievedContext && `Relevant memories:\n${retrievedContext}`,
+    conversationBuffer &&
+      `Conversation context:\n${conversationBuffer}`,
+    retrievedContext &&
+      `Relevant long-term memories:\n${retrievedContext}`,
   ]
     .filter(Boolean)
     .join("\n\n");
@@ -264,7 +280,7 @@ ${memoryBlock}
     generatedAnswer,
     correct,
     retrievedContext,
-    compactSummary,
+    compactSummary: conversationBuffer,
     stats,
     indexingTimeMs,
     retrievalTimeMs,

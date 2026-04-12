@@ -1,30 +1,30 @@
 # Brainy
 
-A hippocampus-inspired dual-memory conversational agent built with LangGraph TypeScript and Bun. Implements a full [HippoRAG2](https://arxiv.org/abs/2502.14802) retrieval system with Personalized PageRank alongside a compact narrative memory, enabling long-form conversations that stay under ~3.5K prompt tokens regardless of conversation length.
+A hippocampus-inspired dual-memory conversational agent built with LangGraph TypeScript and Bun. Implements a full [HippoRAG2](https://arxiv.org/abs/2502.14802) retrieval system with Personalized PageRank alongside a pressure-based conversation buffer, enabling long-form conversations with full-fidelity recent context and compressed long-term memory.
 
 ## Architecture
 
-The agent always stays on **"turn 1"** — no message history accumulates. All continuity comes from two memory stores injected into the prompt each turn:
+The agent uses a **pressure-based memory model**: real conversation turns accumulate in a buffer until they exceed a token threshold (~1024 tokens), at which point the buffer is summarized and indexed into HippoRAG2 for long-term retrieval. This means the LLM sees actual messages for recent turns and compressed summaries for older history.
 
 ```
 User message
     │
     ▼
-[retrieve]  ── query compact summary + HippoRAG2 (PPR over knowledge graph)
+[retrieve]  ── query HippoRAG2 (PPR over knowledge graph) for long-term memories
     │
     ▼
-[respond]   ── LLM call with ONLY: system prompt + memories + current message
+[respond]   ── LLM call with: system prompt + conversation buffer + retrieved memories + current message
     │
     ▼
-[memorize]  ── update compact summary + index episode in HippoRAG2
-    │           + periodic summary-of-summaries + semantic forgetting
+[memorize]  ── append exchange to buffer
+    │           if buffer > 1024 tokens: summarize + index into HippoRAG2 + semantic forgetting
     ▼
    END
 ```
 
-### 1. Compact Memory
+### 1. Conversation Buffer (Pressure-Based Memory)
 
-A continuously updated one-sentence summary of the entire conversation. Uses a **two-level summary-of-summaries** mechanism (every 10 turns) to correct drift from incremental summarisation — eliminating the "telephone game" effect that degrades quality after hundreds of turns.
+Real conversation turns accumulate in a buffer, preserving full fidelity. When the buffer exceeds ~1024 tokens, it is compressed into a summary paragraph and indexed into HippoRAG2 for long-term retrieval. The summary replaces the buffer, and new turns accumulate on top of it until the next compression cycle. This mirrors how human short-term memory works — recent events are recalled in detail, older ones as gist.
 
 ### 2. HippoRAG2 Vector Memory
 
@@ -147,7 +147,7 @@ The **hybrid config** (default) gives the best of both worlds: Sonnet-level accu
 src/
   index.ts                     # Terminal chat loop (readline)
   graph.ts                     # LangGraph: START → retrieve → respond → memorize → END
-  state.ts                     # State annotation (no message accumulation)
+  state.ts                     # State annotation (pressure-based buffer model)
   llm.ts                       # ChatAnthropic (Sonnet + Haiku) + Voyage 3.5
   utils.ts                     # Cosine similarity, hash IDs, normalization
   singletons.ts                # Shared HippoRAG + CompactMemory instances
@@ -156,9 +156,9 @@ src/
   nodes/
     retrieve.ts                # Query HippoRAG2 for relevant passages
     respond.ts                 # LLM response with memory-injected prompt
-    memorize.ts                # Update compact summary + index in HippoRAG
+    memorize.ts                # Append to buffer + pressure-based summarize/index
   memory/
-    compact-memory.ts          # One-sentence summary + summary-of-summaries
+    compact-memory.ts          # Pressure-based buffer with token-threshold summarization
     types.ts                   # Memory context types
   hipporag/                    # Standalone HippoRAG2 module
     index.ts                   # Main class (index + retrieve + forget)
