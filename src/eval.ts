@@ -53,6 +53,8 @@ export interface TurnSnapshot {
   sessionIndex: number;
   exchangeText: string;
   bufferTokensBefore: number;
+  /** Token count after appending the exchange but before summarization */
+  bufferTokensPeak: number;
   bufferTokensAfter: number;
   summarized: boolean;
   summaryText?: string;
@@ -243,6 +245,9 @@ export async function evaluateQuestion(
         exchangeText
       );
 
+      // Capture peak token count AFTER append but BEFORE summarization
+      const bufferTokensPeak = estimateTokens(conversationBuffer);
+
       let summarized = false;
       let summaryText: string | undefined;
 
@@ -265,6 +270,7 @@ export async function evaluateQuestion(
         sessionIndex: sessIdx,
         exchangeText,
         bufferTokensBefore,
+        bufferTokensPeak,
         bufferTokensAfter,
         summarized,
         summaryText,

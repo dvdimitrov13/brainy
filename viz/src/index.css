@@ -325,22 +325,36 @@ body {
   gap: 2px;
 }
 
-.chart-bar {
+.chart-bar-wrapper {
   flex: 1;
-  background: var(--accent);
-  border-radius: 2px 2px 0 0;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-end;
   min-width: 4px;
-  position: relative;
-  transition: background 0.15s;
   cursor: pointer;
+  position: relative;
 }
 
-.chart-bar:hover {
+.chart-bar {
+  background: var(--accent);
+  border-radius: 2px 2px 0 0;
+  position: relative;
+  transition: background 0.15s;
+}
+
+.chart-bar-wrapper:hover .chart-bar {
   background: var(--text);
 }
 
 .chart-bar.summarized {
   background: var(--summarize);
+}
+
+.chart-bar.peak {
+  background: var(--fail);
+  opacity: 0.3;
+  border-radius: 2px 2px 0 0;
 }
 
 .chart-threshold {
@@ -380,6 +394,12 @@ body {
 
 .chart-legend .legend-normal::before { background: var(--accent); }
 .chart-legend .legend-summarized::before { background: var(--summarize); }
+.chart-legend .legend-peak::before { background: var(--fail); opacity: 0.3; }
+
+.peak-tokens {
+  color: var(--fail);
+  font-weight: 600;
+}
 
 .turn-list {
   display: flex;

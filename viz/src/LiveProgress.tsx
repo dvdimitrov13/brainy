@@ -96,7 +96,12 @@ export default function LiveProgress({
                     {snap.kgStats.entities}e / {snap.kgStats.facts}f
                   </span>
                   <span className="token-info">
-                    {snap.bufferTokensBefore} &rarr; {snap.bufferTokensAfter}{" "}
+                    {snap.bufferTokensBefore} &rarr;{" "}
+                    {snap.summarized ? (
+                      <><span className="peak-tokens">{snap.bufferTokensPeak}</span> &rarr; {snap.bufferTokensAfter}</>
+                    ) : (
+                      snap.bufferTokensAfter
+                    )}{" "}
                     tokens
                   </span>
                 </div>

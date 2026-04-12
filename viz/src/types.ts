@@ -4,6 +4,8 @@ export interface TurnSnapshot {
   sessionIndex: number;
   exchangeText: string;
   bufferTokensBefore: number;
+  /** Token count after appending exchange but before summarization */
+  bufferTokensPeak: number;
   bufferTokensAfter: number;
   summarized: boolean;
   summaryText?: string;

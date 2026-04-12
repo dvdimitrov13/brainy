@@ -12,7 +12,7 @@ function BufferChart({ turns }: { turns: TurnSnapshot[] }) {
 
   const maxTokens = Math.max(
     1024,
-    ...turns.map((t) => t.bufferTokensAfter)
+    ...turns.map((t) => Math.max(t.bufferTokensPeak, t.bufferTokensAfter))
   );
   const chartHeight = 120;
   const thresholdY = chartHeight - (1024 / maxTokens) * chartHeight;
@@ -28,20 +28,38 @@ function BufferChart({ turns }: { turns: TurnSnapshot[] }) {
           <span className="chart-threshold-label">1024 threshold</span>
         </div>
         {turns.map((t) => {
-          const height = (t.bufferTokensAfter / maxTokens) * chartHeight;
+          // For summarized turns, show the peak (before compression) as a ghost bar
+          // and the after (compressed) as the solid bar
+          const peakHeight = (t.bufferTokensPeak / maxTokens) * chartHeight;
+          const afterHeight = (t.bufferTokensAfter / maxTokens) * chartHeight;
           return (
             <div
               key={t.turnIndex}
-              className={`chart-bar ${t.summarized ? "summarized" : ""}`}
-              style={{ height: Math.max(2, height) }}
-              title={`Turn ${t.turnIndex + 1}: ${t.bufferTokensAfter} tokens${t.summarized ? " (summarized)" : ""}`}
-            />
+              className="chart-bar-wrapper"
+              title={
+                t.summarized
+                  ? `Turn ${t.turnIndex + 1}: peaked at ${t.bufferTokensPeak} → compressed to ${t.bufferTokensAfter} tokens`
+                  : `Turn ${t.turnIndex + 1}: ${t.bufferTokensAfter} tokens`
+              }
+            >
+              {t.summarized && (
+                <div
+                  className="chart-bar peak"
+                  style={{ height: Math.max(2, peakHeight) }}
+                />
+              )}
+              <div
+                className={`chart-bar ${t.summarized ? "summarized" : ""}`}
+                style={{ height: Math.max(2, t.summarized ? afterHeight : peakHeight) }}
+              />
+            </div>
           );
         })}
       </div>
       <div className="chart-legend">
         <span className="legend-normal">Normal</span>
-        <span className="legend-summarized">Summarized</span>
+        <span className="legend-summarized">Compressed</span>
+        <span className="legend-peak">Peak (before compression)</span>
       </div>
     </div>
   );
@@ -233,7 +251,12 @@ export default function QuestionDetail({ result, onBack }: Props) {
                     </span>
                     <span className="token-info">
                       {turn.bufferTokensBefore} &rarr;{" "}
-                      {turn.bufferTokensAfter} tokens
+                      {turn.summarized ? (
+                        <><span className="peak-tokens">{turn.bufferTokensPeak}</span> &rarr; {turn.bufferTokensAfter}</>
+                      ) : (
+                        turn.bufferTokensAfter
+                      )}{" "}
+                      tokens
                     </span>
                   </div>
 
