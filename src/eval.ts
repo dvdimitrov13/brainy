@@ -12,20 +12,18 @@
  *
  * For each question:
  *   1. Reset memory to fresh state
- *   2. Feed all haystack sessions into HippoRAG + Compact Memory (indexing)
+ *   2. Feed all haystack sessions into HippoRAG + conversation buffer (indexing)
  *   3. Run retrieval + generation for the question
  *   4. Use LLM judge (Claude) to evaluate if the answer is correct
  *   5. Record scores by category
+ *
+ * Outputs a detailed JSON with turn-level data for frontend visualization.
  *
  * Usage:
  *   bun run src/eval.ts                    # run default sample (5 per category)
  *   bun run src/eval.ts --count 10         # 10 per category
  *   bun run src/eval.ts --count all        # run all 500
  *   bun run src/eval.ts --type multi-session --count 20
- *
- * TS note for Python devs:
- *   `process.argv` is like `sys.argv` — an array of command-line arguments.
- *   `Bun.file(path).json()` reads and parses a JSON file (like json.load(open(path))).
  */
 
 import { HippoRAG } from "./hipporag/index.ts";
@@ -57,7 +55,19 @@ interface EvalItem {
   answer_session_ids: string[];
 }
 
-/** Result of evaluating a single question */
+/** Snapshot of a single indexing turn — for frontend visualization */
+interface TurnSnapshot {
+  turnIndex: number;
+  sessionIndex: number;
+  exchangeText: string;
+  bufferTokensBefore: number;
+  bufferTokensAfter: number;
+  summarized: boolean;
+  summaryText?: string;
+  kgStats: { passages: number; entities: number; facts: number };
+}
+
+/** Result of evaluating a single question — enriched with turn-level data */
 interface EvalResult {
   questionId: string;
   questionType: string;
@@ -66,10 +76,12 @@ interface EvalResult {
   generatedAnswer: string;
   correct: boolean;
   retrievedContext: string;
-  compactSummary: string;
+  conversationBuffer: string;
   stats: { passages: number; entities: number; facts: number };
   indexingTimeMs: number;
   retrievalTimeMs: number;
+  /** Turn-by-turn snapshots during indexing */
+  turns: TurnSnapshot[];
 }
 
 // ══════════════════════════════════════════════
@@ -100,18 +112,20 @@ function parseArgs(): { count: number | "all"; type?: string; dataset: string } 
 }
 
 // ══════════════════════════════════════════════
+// HELPERS
+// ══════════════════════════════════════════════
+
+/** Rough token estimate (~4 chars per token) */
+function estimateTokens(text: string): number {
+  return Math.ceil(text.length / 4);
+}
+
+// ══════════════════════════════════════════════
 // LLM JUDGE
 // ══════════════════════════════════════════════
 
 /**
  * Use Claude as a judge to evaluate if the generated answer is correct.
- *
- * This mirrors LongMemEval's evaluation approach (they use GPT-4o).
- * The judge checks semantic equivalence, not exact string match —
- * "GPS wasn't working" and "GPS system not functioning correctly"
- * should both count as correct.
- *
- * @returns true if the answer is judged correct
  */
 async function judgeAnswer(
   question: string,
@@ -160,42 +174,35 @@ Verdict:`
 
 /**
  * Evaluate a single LongMemEval question.
- *
- * Steps:
- *   1. Create fresh HippoRAG + CompactMemory instances
- *   2. Feed all haystack sessions (user+assistant pairs) into memory
- *   3. Retrieve relevant context for the question
- *   4. Generate an answer using LLM + retrieved context
- *   5. Judge correctness via LLM
+ * Captures turn-level snapshots for visualization.
  */
 async function evaluateQuestion(item: EvalItem): Promise<EvalResult> {
   // ── Step 1: Fresh memory instances ──
   const hipporag = new HippoRAG();
   const compactMemory = new CompactMemory();
   let conversationBuffer = "";
+  const turns: TurnSnapshot[] = [];
+  let globalTurnIndex = 0;
 
   // ── Step 2: Index all sessions ──
-  // Accumulate turns in the buffer. When buffer exceeds token threshold,
-  // summarize + index into HippoRAG (same as the live agent).
   const indexStart = Date.now();
 
   for (let sessIdx = 0; sessIdx < item.haystack_sessions.length; sessIdx++) {
     const session = item.haystack_sessions[sessIdx]!;
-    // Sessions are objects with numeric string keys, not arrays
-    const turns = Object.values(session) as Turn[];
+    const sessionTurns = Object.values(session) as Turn[];
 
-    // Pair up user/assistant turns into exchanges
-    for (let t = 0; t < turns.length; t += 2) {
-      const userTurn = turns[t];
-      const assistantTurn = turns[t + 1];
+    for (let t = 0; t < sessionTurns.length; t += 2) {
+      const userTurn = sessionTurns[t];
+      const assistantTurn = sessionTurns[t + 1];
 
       if (!userTurn) continue;
 
-      // Build exchange text (user + assistant if available)
       let exchangeText = `User: ${userTurn.content}`;
       if (assistantTurn) {
         exchangeText += `\nAssistant: ${assistantTurn.content}`;
       }
+
+      const bufferTokensBefore = estimateTokens(conversationBuffer);
 
       // Append to buffer
       conversationBuffer = compactMemory.append(
@@ -203,15 +210,38 @@ async function evaluateQuestion(item: EvalItem): Promise<EvalResult> {
         exchangeText
       );
 
-      // Check memory pressure — summarize + index when buffer is too large
+      // Check memory pressure
+      let summarized = false;
+      let summaryText: string | undefined;
+
       if (compactMemory.shouldSummarize(conversationBuffer)) {
         const [summary] = await Promise.all([
           compactMemory.summarize(conversationBuffer),
           hipporag.index(conversationBuffer),
         ]);
+        summaryText = summary;
         conversationBuffer = summary;
+        summarized = true;
         hipporag.forget();
       }
+
+      const bufferTokensAfter = estimateTokens(conversationBuffer);
+      const kgStats = hipporag.getStats();
+
+      turns.push({
+        turnIndex: globalTurnIndex++,
+        sessionIndex: sessIdx,
+        exchangeText,
+        bufferTokensBefore,
+        bufferTokensAfter,
+        summarized,
+        summaryText,
+        kgStats: {
+          passages: kgStats.passages,
+          entities: kgStats.entities,
+          facts: kgStats.facts,
+        },
+      });
     }
   }
 
@@ -280,10 +310,11 @@ ${memoryBlock}
     generatedAnswer,
     correct,
     retrievedContext,
-    compactSummary: conversationBuffer,
+    conversationBuffer,
     stats,
     indexingTimeMs,
     retrievalTimeMs,
+    turns,
   };
 }
 
@@ -316,10 +347,8 @@ async function main() {
   // Sample if count is not "all"
   if (count !== "all") {
     if (type) {
-      // Single type: just take the first N
       items = items.slice(0, count);
     } else {
-      // Multiple types: take N per type for balanced evaluation
       const byType = new Map<string, EvalItem[]>();
       for (const item of items) {
         if (!byType.has(item.question_type)) {
@@ -381,7 +410,6 @@ async function main() {
   console.log("  LONGMEMEVAL EVALUATION RESULTS");
   console.log("═".repeat(70));
 
-  // Overall accuracy
   const totalCorrect = results.filter((r) => r.correct).length;
   const totalQuestions = results.length;
   const overallAccuracy = (totalCorrect / totalQuestions) * 100;
@@ -390,7 +418,6 @@ async function main() {
     `\n  Overall Accuracy: ${totalCorrect}/${totalQuestions} (${overallAccuracy.toFixed(1)}%)\n`
   );
 
-  // Per-type breakdown
   const typeGroups = new Map<string, EvalResult[]>();
   for (const r of results) {
     if (!typeGroups.has(r.questionType)) {
@@ -412,7 +439,6 @@ async function main() {
     );
   }
 
-  // Timing stats
   const avgIndexTime =
     results.reduce((s, r) => s + r.indexingTimeMs, 0) / results.length;
   const avgRetrievalTime =
@@ -431,10 +457,15 @@ async function main() {
 
   console.log("\n" + "═".repeat(70) + "\n");
 
-  // Write detailed results to file
+  // Write detailed results to file (includes turn-level data for viz)
   const outputPath = `data/eval_results_${dataset}_${new Date().toISOString().slice(0, 10)}.json`;
   await Bun.write(outputPath, JSON.stringify(results, null, 2));
   console.log(`Detailed results saved to ${outputPath}`);
+
+  // Also write to viz/public so the frontend can load it
+  const vizPath = `viz/public/eval_results.json`;
+  await Bun.write(vizPath, JSON.stringify(results, null, 2));
+  console.log(`Frontend data saved to ${vizPath}`);
 }
 
 main().catch((err) => {
