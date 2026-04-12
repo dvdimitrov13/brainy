@@ -197,7 +197,7 @@ interface TurnResult {
   input: string;
   response: string;
   conversationBuffer: string;
-  retrievedTriples: string;
+  memoryContext: string;
   stats: { passages: number; entities: number; facts: number; graphNodes: number };
   recallScore?: { matched: string[]; missed: string[]; score: number };
 }
@@ -238,7 +238,7 @@ async function runTest() {
       input: input.slice(0, 80) + (input.length > 80 ? "..." : ""),
       response: result.aiResponse as string,
       conversationBuffer: result.conversationBuffer as string,
-      retrievedTriples: (result.retrievedTriples as string) || "(none)",
+      memoryContext: "(agent uses tools to retrieve)",
       stats,
     };
 

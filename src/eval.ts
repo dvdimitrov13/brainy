@@ -323,16 +323,14 @@ export async function evaluateQuestion(
 
   const indexingTimeMs = Date.now() - indexStart;
 
-  // ── Phase 1: Retrieve triples (automatic associations) ──
+  // ── Recognize: surface relevant entity associations ──
   const tripleStart = Date.now();
-  const triples = await hipporag.retrieveTriples(item.question);
+  const triples = await hipporag.recognize(item.question);
   const tripleRetrievalMs = Date.now() - tripleStart;
 
-  // ── Phase 2: Retrieve passages via PPR (the "recall" tool) ──
-  // HippoRAG stores dense summaries (4:1 compressed), so passages
-  // are already compact — return them directly.
+  // ── Recall: retrieve passage summaries via PPR ──
   const passageStart = Date.now();
-  const passages = await hipporag.retrievePassages(item.question, triples);
+  const passages = await hipporag.recall(item.question, triples);
   const passageRetrievalMs = Date.now() - passageStart;
 
   const retrievalTimeMs = tripleRetrievalMs + passageRetrievalMs;

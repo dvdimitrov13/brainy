@@ -251,25 +251,24 @@ export class HippoRAG {
   }
 
   // ══════════════════════════════════════════════
-  // RETRIEVAL PIPELINE (two-phase)
+  // RETRIEVAL PIPELINE (two tools)
   //
-  // Phase 1: retrieveTriples — fast, automatic every turn
+  // recognize() — agent calls this to surface associations
   //   Embed query → dense triple match → LLM filter (recognition memory)
-  //   Returns lightweight triple associations the agent can see
+  //   Returns lightweight triple associations
   //
-  // Phase 2: retrievePassages — agent-initiated "deep recall"
+  // recall() — agent calls this to retrieve full passages
   //   Takes filtered triples → PPR over knowledge graph → return passages
-  //   Only runs when the agent actively decides to recall
+  //   Only runs when the agent decides it needs the actual content
   //
   // retrieve() is a convenience that runs both phases.
   // ══════════════════════════════════════════════
 
   /**
-   * Phase 1: Retrieve and filter relevant triples for a query.
+   * Recognize: surface relevant entity associations for a query.
    *
-   * This is the "automatic association" step — fast and lightweight.
-   * Runs every turn to give the agent awareness of relevant connections
-   * without the cost of full PPR passage retrieval.
+   * The agent calls this tool to check what connections exist in
+   * long-term memory. Returns lightweight triples — fast and cheap.
    *
    * Pipeline: embed query → cosine similarity on fact embeddings →
    *   top-K candidates → LLM recognition memory filter
@@ -277,38 +276,24 @@ export class HippoRAG {
    * @param query — the user's message
    * @returns filtered triples that passed recognition memory
    */
-  async retrieveTriples(query: string): Promise<Triple[]> {
+  async recognize(query: string): Promise<Triple[]> {
     if (this.passages.size === 0) return [];
 
     // ── Step 1: Embed the query ──
     const queryEmbedding = await embedQuery(query);
 
     // ── Step 2: Get fact scores (dense triple retrieval) ──
+    // Use raw cosine similarity with a hard threshold (0.8) instead of
+    // top-K. Only triples genuinely similar to the query pass through.
     const factIds = this.factStore.getAllIds();
-    const factScores: number[] = [];
+    const candidateTriples: Triple[] = [];
 
     for (const factId of factIds) {
       const factEmb = this.factStore.getEmbedding(factId);
-      if (factEmb) {
-        factScores.push(cosineSimilarity(queryEmbedding, factEmb));
-      } else {
-        factScores.push(0);
-      }
-    }
+      if (!factEmb) continue;
 
-    const normalizedFactScores = minMaxNormalize(factScores);
-
-    // ── Step 3: Get top-K candidate triples ──
-    const candidateIndices = normalizedFactScores
-      .map((score, idx) => ({ idx, score }))
-      .sort((a, b) => b.score - a.score)
-      .slice(0, this.config.linkingTopK);
-
-    const candidateTriples: Triple[] = [];
-
-    for (const { idx } of candidateIndices) {
-      const factId = factIds[idx];
-      if (factId) {
+      const sim = cosineSimilarity(queryEmbedding, factEmb);
+      if (sim >= this.config.recognizeThreshold) {
         const triple = this.factIdToTriple.get(factId);
         if (triple) {
           candidateTriples.push(triple);
@@ -331,11 +316,10 @@ export class HippoRAG {
    * Falls back to dense passage retrieval (DPR) if no triples provided.
    *
    * @param query — the original query (needed for DPR fallback + passage scoring)
-   * @param triples — filtered triples from retrieveTriples() that seed the PPR
-   * @param topK — number of passages to return
+   * @param triples — filtered triples from recognize() that seed the PPR
    * @returns array of Passage objects, most relevant first
    */
-  async retrievePassages(
+  async recall(
     query: string,
     triples: Triple[]
   ): Promise<Passage[]> {
@@ -473,13 +457,12 @@ export class HippoRAG {
   /**
    * Full retrieval pipeline (convenience method).
    *
-   * Runs both phases: retrieveTriples → retrievePassages.
-   * Used by the eval harness and anywhere the full pipeline is needed
-   * without the agent deciding.
+   * Runs both phases: recognize → recall.
+   * Used by the eval harness and anywhere the full pipeline is needed.
    */
   async retrieve(query: string): Promise<Passage[]> {
-    const triples = await this.retrieveTriples(query);
-    return this.retrievePassages(query, triples);
+    const triples = await this.recognize(query);
+    return this.recall(query, triples);
   }
 
   // ══════════════════════════════════════════════

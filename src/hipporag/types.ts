@@ -85,8 +85,12 @@ export interface HippoRAGConfig {
    *  Low value (0.05) so phrase nodes dominate the seed signal. */
   passageNodeWeight: number;
 
-  /** Number of top triples to retrieve for recognition memory filtering. */
+  /** Number of top triples to retrieve for recognition memory filtering (used in recall). */
   linkingTopK: number;
+
+  /** Cosine similarity threshold for recognize — only triples above this
+   *  pass through to the LLM filter. 0.8 = must be genuinely similar. */
+  recognizeThreshold: number;
 
   /** Cosine similarity threshold for creating synonym edges between entities. */
   synonymyThreshold: number;
@@ -116,6 +120,7 @@ export const DEFAULT_CONFIG: HippoRAGConfig = {
   damping: 0.5,
   passageNodeWeight: 0.05,
   linkingTopK: 5,
+  recognizeThreshold: 0.8,
   synonymyThreshold: 0.8,
   synonymyTopK: 10,
   maxPassages: 200,
