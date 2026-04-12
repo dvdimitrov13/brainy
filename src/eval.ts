@@ -241,6 +241,7 @@ export async function evaluateQuestion(
   for (let sessIdx = 0; sessIdx < item.haystack_sessions.length; sessIdx++) {
     const session = item.haystack_sessions[sessIdx]!;
     const sessionTurns = Object.values(session) as Turn[];
+    const sessionDate = item.haystack_dates?.[sessIdx] ?? "";
 
     for (let t = 0; t < sessionTurns.length; t += 2) {
       const userTurn = sessionTurns[t];
@@ -248,7 +249,11 @@ export async function evaluateQuestion(
 
       if (!userTurn) continue;
 
-      let exchangeText = `User: ${userTurn.content}`;
+      // Prepend session date so summaries and triples carry temporal context
+      let exchangeText = sessionDate
+        ? `[Session: ${sessionDate}]\n`
+        : "";
+      exchangeText += `User: ${userTurn.content}`;
       if (assistantTurn) {
         exchangeText += `\nAssistant: ${assistantTurn.content}`;
       }
