@@ -794,3 +794,109 @@ body {
   font-size: 0.8rem;
   color: var(--text-dim);
 }
+
+.detail-loading {
+  font-size: 0.8rem;
+  color: var(--text-dim);
+  padding: 0.5rem 0;
+}
+
+/* ── Session viewer ── */
+
+.session-viewer {
+  margin-top: 0.75rem;
+}
+
+.session-summary {
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  margin-bottom: 0.5rem;
+}
+
+.session-block {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  margin-bottom: 0.5rem;
+  overflow: hidden;
+}
+
+.session-header {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.5rem 0.75rem;
+  cursor: pointer;
+  transition: background 0.15s;
+  background: var(--surface);
+}
+
+.session-header:hover {
+  background: var(--surface-hover);
+}
+
+.session-label {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.session-turns {
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  flex: 1;
+}
+
+.expand-icon {
+  color: var(--text-dim);
+  font-size: 0.9rem;
+  width: 16px;
+  text-align: center;
+}
+
+.session-turns-list {
+  padding: 0.5rem 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.turn-pair {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.turn-msg {
+  display: flex;
+  gap: 0.5rem;
+  font-size: 0.8rem;
+  line-height: 1.4;
+}
+
+.role-label {
+  font-size: 0.65rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  padding: 0.1rem 0.3rem;
+  border-radius: 2px;
+  flex-shrink: 0;
+  height: fit-content;
+  margin-top: 0.1rem;
+}
+
+.user-msg .role-label {
+  background: rgba(108, 140, 255, 0.15);
+  color: var(--accent);
+}
+
+.assistant-msg .role-label {
+  background: rgba(74, 222, 128, 0.1);
+  color: var(--pass);
+}
+
+.msg-content {
+  color: var(--text-dim);
+  white-space: pre-wrap;
+  word-break: break-word;
+}

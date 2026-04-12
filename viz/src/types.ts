@@ -42,6 +42,21 @@ export interface DatasetResponse {
   total: number;
 }
 
+/** Full question detail from the dataset API (includes session turns) */
+export interface QuestionDetail {
+  questionId: string;
+  questionType: string;
+  question: string;
+  answer: string;
+  questionDate: string;
+  haystackDates: string[];
+  answerSessionIds: string[];
+  sessions: {
+    sessionIndex: number;
+    turns: { role: string; content: string }[];
+  }[];
+}
+
 /** SSE event from the eval API */
 export type SSEEvent =
   | { type: "start"; total: number }

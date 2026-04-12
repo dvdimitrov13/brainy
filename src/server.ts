@@ -150,6 +150,60 @@ const server = Bun.serve({
       }
     }
 
+    // ── GET /api/dataset/question?id=xxx — get full question with sessions ──
+    if (url.pathname === "/api/dataset/question") {
+      try {
+        const dataset = await getDataset();
+        const questionId = url.searchParams.get("id");
+
+        if (!questionId) {
+          return Response.json(
+            { error: "Missing 'id' parameter" },
+            { status: 400, headers: corsHeaders }
+          );
+        }
+
+        const item = dataset.find((i) => i.question_id === questionId);
+        if (!item) {
+          return Response.json(
+            { error: `Question '${questionId}' not found` },
+            { status: 404, headers: corsHeaders }
+          );
+        }
+
+        // Parse sessions into a cleaner structure for the frontend
+        const sessions = item.haystack_sessions.map((session, idx) => {
+          const turns = Object.values(session) as { role: string; content: string }[];
+          return {
+            sessionIndex: idx,
+            turns: turns.map((t) => ({
+              role: t.role,
+              content: t.content,
+            })),
+          };
+        });
+
+        return Response.json(
+          {
+            questionId: item.question_id,
+            questionType: item.question_type,
+            question: item.question,
+            answer: item.answer,
+            questionDate: item.question_date,
+            haystackDates: item.haystack_dates,
+            answerSessionIds: item.answer_session_ids,
+            sessions,
+          },
+          { headers: corsHeaders }
+        );
+      } catch (error) {
+        return Response.json(
+          { error: `Failed to load question: ${error}` },
+          { status: 500, headers: corsHeaders }
+        );
+      }
+    }
+
     // ── GET /api/eval/run?count=2&type=temporal-reasoning — run eval sweep ──
     if (url.pathname === "/api/eval/run") {
       try {
@@ -228,6 +282,7 @@ const server = Bun.serve({
         error: "Not found",
         routes: [
           "GET /api/dataset",
+          "GET /api/dataset/question?id=...",
           "GET /api/eval/run?count=2&type=...",
           "GET /api/eval/question?id=...",
         ],
@@ -239,6 +294,7 @@ const server = Bun.serve({
 
 console.log(`Eval API server running on http://localhost:${PORT}`);
 console.log("Routes:");
-console.log("  GET /api/dataset              — list all dataset questions");
-console.log("  GET /api/eval/run?count=2     — run eval sweep (SSE)");
-console.log("  GET /api/eval/question?id=... — run single question (SSE)");
+console.log("  GET /api/dataset                  — list all dataset questions");
+console.log("  GET /api/dataset/question?id=...  — full question with session turns");
+console.log("  GET /api/eval/run?count=2         — run eval sweep (SSE)");
+console.log("  GET /api/eval/question?id=...     — run single question (SSE)");
