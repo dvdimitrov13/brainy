@@ -159,36 +159,53 @@ Respond with ONLY the summary.`,
 }
 
 // ══════════════════════════════════════════════
-// REMEMBER TOOL
+// TOOLS
 // ══════════════════════════════════════════════
 
-function getRememberTool() {
-  return {
-    type: "function" as const,
-    function: {
-      name: "remember",
-      description:
-        "Search long-term memory. Optionally filter by type and/or topics. " +
-        "For counting/listing, make multiple calls with different filters.",
-      parameters: {
-        type: "object" as const,
-        properties: {
-          query: { type: "string" as const, description: "Search query" },
-          type: {
-            type: "array" as const,
-            items: { type: "string" as const },
-            description: 'Filter: "event","decision","preference","fact","goal","plan"',
+function getEvalTools() {
+  return [
+    {
+      type: "function" as const,
+      function: {
+        name: "explore_topics",
+        description:
+          "Find which memory topics match your question. Returns relevant topic tags for filtering.",
+        parameters: {
+          type: "object" as const,
+          properties: {
+            request: { type: "string" as const, description: "What you're looking for" },
           },
-          topics: {
-            type: "array" as const,
-            items: { type: "string" as const },
-            description: "Filter: topic keywords like [\"property\",\"kitchen\"]",
-          },
+          required: ["request"],
         },
-        required: ["query"],
       },
     },
-  };
+    {
+      type: "function" as const,
+      function: {
+        name: "remember",
+        description:
+          "Search long-term memory. Use type/topics filters for precise results. " +
+          "For counting/listing, make multiple calls with different filters.",
+        parameters: {
+          type: "object" as const,
+          properties: {
+            query: { type: "string" as const, description: "Search query" },
+            type: {
+              type: "array" as const,
+              items: { type: "string" as const },
+              description: 'Filter: "event","decision","preference","fact","goal","plan"',
+            },
+            topics: {
+              type: "array" as const,
+              items: { type: "string" as const },
+              description: "Filter: use exact topic names from the topic list",
+            },
+          },
+          required: ["query"],
+        },
+      },
+    },
+  ];
 }
 
 // ══════════════════════════════════════════════
@@ -239,10 +256,12 @@ export async function evaluateQuestion(
   const hipporag = new HippoRAG();
   let conversationBuffer = "";
   let pendingExchanges: string[] = [];
+  let pressureCount = 0;
   const turns: TurnSnapshot[] = [];
   let globalTurnIndex = 0;
 
   const totalTurns = countTurnPairs(item);
+  const LINT_EVERY = 3;
   const indexStart = Date.now();
   const TOKEN_THRESHOLD = 1024;
 
@@ -284,6 +303,12 @@ export async function evaluateQuestion(
         pendingExchanges = [];
         summarized = true;
         hipporag.forget();
+
+        // Lint topic tags every N pressure events
+        pressureCount++;
+        if (pressureCount % LINT_EVERY === 0) {
+          await hipporag.lintTopics();
+        }
       }
 
       const bufferTokensAfter = estimateTokens(conversationBuffer);
@@ -309,11 +334,13 @@ export async function evaluateQuestion(
       onTurn?.(snapshot, totalTurns);
     }
 
-    // Session boundary: flush + reset
+    // Session boundary: flush + lint + reset
     if (pendingExchanges.length > 0) {
       await Promise.all(pendingExchanges.map((ex) => hipporag.index(ex)));
       pendingExchanges = [];
     }
+    await hipporag.lintTopics();
+    pressureCount = 0;
     if (conversationBuffer) {
       const prevSummary = conversationBuffer.startsWith("[Summary]")
         ? conversationBuffer.slice("[Summary]\n".length).split("\n\n")[0] ?? ""
@@ -330,23 +357,31 @@ export async function evaluateQuestion(
   // ANSWER GENERATION (agent tool-calling loop)
   // ══════════════════════════════════════════════
 
-  const TOOL = getRememberTool();
+  const TOOLS = getEvalTools();
 
   const stats = hipporag.getStats();
+  const topics = hipporag.getTopics();
   const contextParts: string[] = [];
   if (conversationBuffer) contextParts.push(`Conversation:\n${conversationBuffer}`);
   if (stats.passages > 0) {
     contextParts.push(`Long-term memory: ${stats.passages} passages, ${stats.entities} entities`);
+    if (topics.length > 0) {
+      contextParts.push(`Available topics: ${topics.join(", ")}`);
+    }
   }
 
   const messages: (SystemMessage | HumanMessage | AIMessage | ToolMessage)[] = [
     new SystemMessage(
       `You are a helpful assistant with long-term memory.
 
-You have a memory tool: **remember(query, type?, topics?)** — searches past conversations.
+You have two tools:
+- **explore_topics(request)** — finds which memory topics match your question
+- **remember(query, type?, topics?)** — searches past conversations with optional filters
 
-Filters: type (event/decision/preference/fact/goal/plan), topics (keywords).
-For counting/listing, make multiple calls with different filters.
+Types: event, decision, preference, fact, goal, plan
+Topics: use exact names from the available topics list.
+
+For counting/listing: explore_topics first, then remember with each relevant topic.
 
 Do NOT mention your tools. Respond naturally.
 
@@ -361,8 +396,8 @@ ${contextParts.join("\n\n")}
   const retrievalStart = Date.now();
   let generatedAnswer = "";
 
-  for (let i = 0; i < 5; i++) {
-    const response = await llm.invoke(messages, { tools: [TOOL] });
+  for (let i = 0; i < 6; i++) {
+    const response = await llm.invoke(messages, { tools: TOOLS });
     const toolCalls = response.tool_calls;
 
     if (!toolCalls || toolCalls.length === 0) {
@@ -379,13 +414,51 @@ ${contextParts.join("\n\n")}
     messages.push(response);
 
     for (const toolCall of toolCalls) {
-      if (toolCall.name === "remember") {
+      const callStart = Date.now();
+      let result = "";
+
+      if (toolCall.name === "explore_topics") {
+        const args = toolCall.args as { request: string };
+        const topicList = hipporag.getTopics();
+
+        if (topicList.length === 0) {
+          result = "No topics in memory yet.";
+        } else {
+          const resp = await llmFast.invoke([
+            {
+              role: "system" as const,
+              content: `Given a request and topic list, return relevant topics as JSON: {"relevant_topics": ["t1","t2"]}. Be inclusive.`,
+            },
+            {
+              role: "user" as const,
+              content: `Request: ${args.request}\nTopics: ${topicList.join(", ")}`,
+            },
+          ]);
+
+          const respText = typeof resp.content === "string" ? resp.content : "";
+          try {
+            const jsonStr = respText.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
+            const parsed = JSON.parse(jsonStr) as { relevant_topics: string[] };
+            result = parsed.relevant_topics.length > 0
+              ? `Relevant topics: ${parsed.relevant_topics.join(", ")}`
+              : "No matching topics found.";
+          } catch {
+            result = `Available topics: ${topicList.join(", ")}`;
+          }
+        }
+
+        toolCallTraces.push({
+          tool: "explore_topics",
+          query: JSON.stringify(args),
+          result,
+          durationMs: Date.now() - callStart,
+        });
+      } else if (toolCall.name === "remember") {
         const args = toolCall.args as {
           query: string;
           type?: string[];
           topics?: string[];
         };
-        const callStart = Date.now();
 
         const passages = await hipporag.retrieve(
           args.query,
@@ -393,7 +466,7 @@ ${contextParts.join("\n\n")}
           args.topics
         );
 
-        const result =
+        result =
           passages.length > 0
             ? passages
                 .map((p, idx) => {

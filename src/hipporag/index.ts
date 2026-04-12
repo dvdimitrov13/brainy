@@ -33,7 +33,7 @@ import { KnowledgeGraph } from "./knowledge-graph.ts";
 import { EmbeddingStore } from "./embedding-store.ts";
 import { processExchange, tripleToString } from "./openie.ts";
 import { filterTriples } from "./recognition-memory.ts";
-import { embedTexts, embedQuery } from "../llm.ts";
+import { embedTexts, embedQuery, llmFast } from "../llm.ts";
 import {
   computeHashId,
   normalizeEntity,
@@ -741,6 +741,104 @@ export class HippoRAG {
    * Get stats about the current state of the HippoRAG index.
    * Useful for debugging and monitoring.
    */
+  // ══════════════════════════════════════════════
+  // TOPIC LINTING
+  // ══════════════════════════════════════════════
+
+  /**
+   * Get all unique topic tags across all passages.
+   */
+  getTopics(): string[] {
+    const topics = new Set<string>();
+    for (const passage of this.passages.values()) {
+      for (const topic of passage.tags.topics) {
+        topics.add(topic);
+      }
+    }
+    return [...topics].sort();
+  }
+
+  /**
+   * Lint topic tags: ask Haiku to group synonyms and normalize to canonical names.
+   *
+   * This consolidates tag drift (e.g., "property", "properties", "real-estate",
+   * "real estate", "home" → all become "property"). Called every N pressure
+   * events and at session boundaries.
+   */
+  async lintTopics(): Promise<void> {
+    const topics = this.getTopics();
+    if (topics.length < 3) return; // nothing to consolidate
+
+    try {
+      const response = await llmFast.invoke([
+        {
+          role: "system" as const,
+          content: `You consolidate a list of topic tags by grouping synonyms and near-duplicates.
+
+Return ONLY valid JSON mapping canonical names to their aliases:
+{
+  "canonical_name": ["alias1", "alias2"],
+  "another_topic": ["alias3"]
+}
+
+Rules:
+- Pick the most common or descriptive term as canonical
+- Group: plurals (property/properties), variants (real-estate/real estate), synonyms (home/house/property)
+- Keep specific names as-is (cedar-creek, brookside — don't merge location names)
+- If a topic has no synonyms, omit it from the output`,
+        },
+        {
+          role: "user" as const,
+          content: `Topic tags to consolidate:\n${topics.join(", ")}`,
+        },
+      ]);
+
+      const responseText =
+        typeof response.content === "string"
+          ? response.content
+          : (response.content as Array<{ type: string; text?: string }>)
+              .filter((b) => b.type === "text")
+              .map((b) => b.text ?? "")
+              .join("");
+
+      const jsonStr = responseText.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
+      const mergeMap: Record<string, string[]> = JSON.parse(jsonStr);
+
+      // Build reverse map: alias → canonical
+      const aliasToCanonical = new Map<string, string>();
+      for (const [canonical, aliases] of Object.entries(mergeMap)) {
+        for (const alias of aliases) {
+          aliasToCanonical.set(alias.toLowerCase(), canonical.toLowerCase());
+        }
+      }
+
+      if (aliasToCanonical.size === 0) return;
+
+      // Update all passages
+      let updated = 0;
+      for (const passage of this.passages.values()) {
+        const newTopics = passage.tags.topics.map((t) => {
+          const canonical = aliasToCanonical.get(t.toLowerCase());
+          if (canonical) {
+            updated++;
+            return canonical;
+          }
+          return t;
+        });
+        // Deduplicate after normalization
+        passage.tags.topics = [...new Set(newTopics)];
+      }
+
+      if (updated > 0) {
+        console.log(
+          `[Lint] Consolidated ${aliasToCanonical.size} aliases across ${updated} tag references`
+        );
+      }
+    } catch (error) {
+      console.error("[Lint] Topic consolidation failed:", error);
+    }
+  }
+
   getStats(): {
     passages: number;
     entities: number;

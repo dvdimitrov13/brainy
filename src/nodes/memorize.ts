@@ -6,7 +6,7 @@
  *   2. If buffer > 1024 tokens: index each pending exchange into HippoRAG
  *      (processExchange produces summary + triples + tags in one LLM call)
  *   3. Replace buffer with rolling summary
- *   4. Session boundary: flush pending, reset buffer
+ *   4. Every 3 pressure events: lint topic tags (consolidate synonyms)
  *
  * Graph position: START → respond → [memorize] → END
  */
@@ -15,14 +15,16 @@ import type { BrainyState } from "../state.ts";
 import { hipporag } from "../singletons.ts";
 import { llmFast } from "../llm.ts";
 
-/** Token threshold for buffer pressure */
 const TOKEN_THRESHOLD = 1024;
+const LINT_EVERY = 3;
+
+/** Pressure event counter within the current session */
+let pressureCount = 0;
 
 function estimateTokens(text: string): number {
   return Math.ceil(text.length / 4);
 }
 
-/** Generate rolling summary from previous summary + buffer */
 async function rollingSummary(
   prevSummary: string,
   buffer: string
@@ -73,13 +75,10 @@ export async function memorizeNode(
   // ── Check memory pressure ──
   // IMPORTANT: This check runs AFTER the full turn is complete.
   if (estimateTokens(newBuffer) > TOKEN_THRESHOLD && newPending.length > 0) {
-    // Index each pending exchange into HippoRAG (parallel).
-    // Each call: summarize + extract triples + assign tags in one LLM call,
-    // then embed + add to knowledge graph.
+    // Index each pending exchange into HippoRAG (parallel)
     await Promise.all(newPending.map((ex) => hipporag.index(ex)));
 
     // Generate rolling summary and compress buffer
-    // Extract current summary if buffer starts with [Summary]
     const prevSummary = newBuffer.startsWith("[Summary]")
       ? newBuffer.slice("[Summary]\n".length).split("\n\n")[0] ?? ""
       : "";
@@ -89,6 +88,12 @@ export async function memorizeNode(
     newPending = [];
 
     hipporag.forget();
+
+    // Lint topic tags every N pressure events
+    pressureCount++;
+    if (pressureCount % LINT_EVERY === 0) {
+      await hipporag.lintTopics();
+    }
   }
 
   return {
@@ -96,4 +101,13 @@ export async function memorizeNode(
     pendingExchanges: newPending,
     turnCount: newTurnCount,
   };
+}
+
+/**
+ * Reset the pressure counter (called at session boundaries).
+ * Also triggers a final lint before the reset.
+ */
+export async function flushSession(): Promise<void> {
+  await hipporag.lintTopics();
+  pressureCount = 0;
 }
