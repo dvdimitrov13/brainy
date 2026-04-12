@@ -19,7 +19,7 @@
  */
 
 import { buildGraph } from "./graph.ts";
-import { hipporag } from "./singletons.ts";
+import { notepadMemory } from "./singletons.ts";
 
 // ══════════════════════════════════════════════
 // TEST DATA — Simulated "documents" the user shares
@@ -198,7 +198,7 @@ interface TurnResult {
   response: string;
   conversationBuffer: string;
   memoryContext: string;
-  stats: { passages: number; entities: number; facts: number; graphNodes: number };
+  stats: { notepadTokens: number; exchangeCount: number; sectionCount: number };
   recallScore?: { matched: string[]; missed: string[]; score: number };
 }
 
@@ -230,7 +230,7 @@ async function runTest() {
     };
 
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-    const stats = hipporag.getStats();
+    const stats = notepadMemory.getStats();
 
     const turnResult: TurnResult = {
       turn: turnNum,
@@ -242,7 +242,7 @@ async function runTest() {
       stats,
     };
 
-    console.log(`  Turn ${turnNum} [${phase}] (${elapsed}s) — KG: ${stats.entities} entities, ${stats.facts} facts, ${stats.passages} passages`);
+    console.log(`  Turn ${turnNum} [${phase}] (${elapsed}s) — Notepad: ${stats.sectionCount} sections, ${stats.notepadTokens} tokens`);
     return turnResult;
   }
 
@@ -359,13 +359,12 @@ async function runTest() {
     }
   }
 
-  // Knowledge graph final state
-  const finalStats = hipporag.getStats();
-  console.log("\nFinal Knowledge Graph:");
-  console.log(`  Passages:    ${finalStats.passages}`);
-  console.log(`  Entities:    ${finalStats.entities}`);
-  console.log(`  Facts:       ${finalStats.facts}`);
-  console.log(`  Graph nodes: ${finalStats.graphNodes}`);
+  // Notepad final state
+  const finalStats = notepadMemory.getStats();
+  console.log("\nFinal Notepad:");
+  console.log(`  Sections:    ${finalStats.sectionCount}`);
+  console.log(`  Tokens:      ${finalStats.notepadTokens}`);
+  console.log(`  Exchanges:   ${finalStats.exchangeCount}`);
 
   // Conversation buffer final state
   const buf = (state.conversationBuffer as string) || "";

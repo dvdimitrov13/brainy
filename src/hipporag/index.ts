@@ -457,8 +457,8 @@ export class HippoRAG {
   /**
    * Full retrieval pipeline (convenience method).
    *
-   * Runs both phases: recognize → recall.
-   * Used by the eval harness and anywhere the full pipeline is needed.
+   * Full pipeline: recognize → recall in one call.
+   * Used by both the agent tool and the eval.
    */
   async retrieve(query: string): Promise<Passage[]> {
     const triples = await this.recognize(query);

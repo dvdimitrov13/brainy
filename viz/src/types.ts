@@ -9,12 +9,12 @@ export interface TurnSnapshot {
   bufferTokensAfter: number;
   summarized: boolean;
   summaryText?: string;
-  kgStats: { passages: number; entities: number; facts: number };
+  notepadStats: { notepadTokens: number; exchangeCount: number; sectionCount: number };
 }
 
 /** A single tool call the agent made */
 export interface ToolCallTrace {
-  tool: "remember";
+  tool: string;
   query: string;
   result: string;
   durationMs: number;
@@ -36,7 +36,8 @@ export interface EvalResult {
   correct: boolean;
   retrievedContext: string;
   conversationBuffer: string;
-  stats: { passages: number; entities: number; facts: number };
+  notepadContent?: string;
+  stats: { notepadTokens: number; exchangeCount: number; sectionCount: number };
   indexingTimeMs: number;
   retrievalTimeMs: number;
   turns: TurnSnapshot[];

@@ -2,15 +2,8 @@
  * eval.ts — LongMemEval benchmark evaluation logic.
  *
  * Exports core evaluation functions that can be used by both the CLI
- * and the API server. The CLI entrypoint is at the bottom (runs only
- * when this file is executed directly, not when imported).
- *
- * Evaluates Brainy's dual-memory system against the LongMemEval benchmark
- * (ICLR 2025). The benchmark tests 5 long-term memory abilities:
- *   1. Information Extraction (single-session-user/assistant/preference)
- *   2. Multi-Session Reasoning
- *   3. Temporal Reasoning
- *   4. Knowledge Updates
+ * and the API server. Uses the same notepad-based memory system and
+ * tool-calling flow as the live agent.
  *
  * Usage (CLI):
  *   bun run src/eval.ts --count 2
@@ -18,8 +11,8 @@
  *   bun run src/eval.ts --type multi-session --count 5
  */
 
-import { HippoRAG } from "./hipporag/index.ts";
-import { CompactMemory } from "./memory/compact-memory.ts";
+import { NotepadMemory } from "./memory/notepad.ts";
+import type { NoteOperation } from "./memory/notepad.ts";
 import { llm } from "./llm.ts";
 import {
   HumanMessage,
@@ -29,17 +22,15 @@ import {
 } from "@langchain/core/messages";
 
 // ══════════════════════════════════════════════
-// TYPES (exported for server + frontend)
+// TYPES
 // ══════════════════════════════════════════════
 
-/** A single turn in a conversation session */
-export interface Turn {
+interface Turn {
   role: "user" | "assistant";
   content: string;
   has_answer?: boolean;
 }
 
-/** A single evaluation item from the LongMemEval dataset */
 export interface EvalItem {
   question_id: string;
   question_type: string;
@@ -52,37 +43,30 @@ export interface EvalItem {
   answer_session_ids: string[];
 }
 
-/** Snapshot of a single indexing turn — for frontend visualization */
 export interface TurnSnapshot {
   turnIndex: number;
   sessionIndex: number;
   exchangeText: string;
   bufferTokensBefore: number;
-  /** Token count after appending the exchange but before summarization */
   bufferTokensPeak: number;
   bufferTokensAfter: number;
   summarized: boolean;
   summaryText?: string;
-  kgStats: { passages: number; entities: number; facts: number };
+  notepadStats: { notepadTokens: number; exchangeCount: number; sectionCount: number };
 }
 
-/** A single tool call made by the agent during retrieval */
 export interface ToolCallTrace {
-  tool: "remember";
+  tool: string;
   query: string;
   result: string;
   durationMs: number;
 }
 
-/** Tracks the agent's tool call decisions for visualization */
 export interface RetrievalTrace {
-  /** Ordered list of tool calls the agent made */
   toolCalls: ToolCallTrace[];
-  /** Total retrieval time (all tool calls) */
   totalRetrievalMs: number;
 }
 
-/** Result of evaluating a single question — enriched with turn-level data */
 export interface EvalResult {
   questionId: string;
   questionType: string;
@@ -92,11 +76,11 @@ export interface EvalResult {
   correct: boolean;
   retrievedContext: string;
   conversationBuffer: string;
-  stats: { passages: number; entities: number; facts: number };
+  notepadContent: string;
+  stats: { notepadTokens: number; exchangeCount: number; sectionCount: number };
   indexingTimeMs: number;
   retrievalTimeMs: number;
   turns: TurnSnapshot[];
-  /** Two-phase retrieval trace for visualization */
   retrieval: RetrievalTrace;
 }
 
@@ -107,6 +91,16 @@ export interface EvalResult {
 function estimateTokens(text: string): number {
   return Math.ceil(text.length / 4);
 }
+
+export function countTurnPairs(item: EvalItem): number {
+  let count = 0;
+  for (const session of item.haystack_sessions) {
+    count += Math.ceil(Object.values(session).length / 2);
+  }
+  return count;
+}
+
+export type OnTurnCallback = (snapshot: TurnSnapshot, totalTurns: number) => void;
 
 // ══════════════════════════════════════════════
 // LLM JUDGE
@@ -123,25 +117,18 @@ async function judgeAnswer(
 
 The generated answer is CORRECT if:
 - It contains the key information from the expected answer (semantic match, not exact string)
-- It may contain additional details beyond the expected answer — that's fine
+- It may contain additional details — that's fine
 - It may use different wording — what matters is the factual content
 
 The generated answer is INCORRECT if:
 - It misses the key facts from the expected answer
 - It contradicts the expected answer
 - It says "I don't know" or similar when an answer exists
-- It provides a fundamentally different answer
 
 Respond with ONLY "CORRECT" or "INCORRECT", nothing else.`
     ),
     new HumanMessage(
-      `Question: ${question}
-
-Expected answer: ${expectedAnswer}
-
-Generated answer: ${generatedAnswer}
-
-Verdict:`
+      `Question: ${question}\n\nExpected answer: ${expectedAnswer}\n\nGenerated answer: ${generatedAnswer}\n\nVerdict:`
     ),
   ]);
 
@@ -154,37 +141,140 @@ Verdict:`
 }
 
 // ══════════════════════════════════════════════
-// CORE EVALUATION LOGIC (exported)
+// TOOL DEFINITIONS (same as respond.ts)
 // ══════════════════════════════════════════════
 
-/**
- * Load the LongMemEval dataset from disk.
- */
-export async function loadDataset(
-  dataset: string = "oracle"
-): Promise<EvalItem[]> {
-  const dataPath =
-    dataset === "s"
-      ? "data/longmemeval_s_cleaned.json"
-      : "data/longmemeval_oracle.json";
+function getEvalTools() {
+  return [
+    {
+      type: "function" as const,
+      function: {
+        name: "write_notes",
+        description:
+          "Add new notes to your notepad. Organize by topic using section paths. Cite source exchanges with [exchange:ID].",
+        parameters: {
+          type: "object" as const,
+          properties: {
+            notes: {
+              type: "array" as const,
+              items: {
+                type: "object" as const,
+                properties: {
+                  sectionPath: { type: "string" as const, description: "Hierarchical path: Topic/Subtopic" },
+                  content: { type: "string" as const, description: "Note content with citations [exchange:ID]" },
+                  afterSection: { type: "string" as const, description: "Optional: place after this section" },
+                },
+                required: ["sectionPath", "content"],
+              },
+            },
+          },
+          required: ["notes"],
+        },
+      },
+    },
+    {
+      type: "function" as const,
+      function: {
+        name: "edit_notes",
+        description: "Update an existing section. Must read it first with read_notes.",
+        parameters: {
+          type: "object" as const,
+          properties: {
+            section: { type: "string" as const },
+            content: { type: "string" as const },
+          },
+          required: ["section", "content"],
+        },
+      },
+    },
+    {
+      type: "function" as const,
+      function: {
+        name: "read_notes",
+        description: "Read a section's content (not subsections). Omit section to get TOC.",
+        parameters: {
+          type: "object" as const,
+          properties: {
+            section: { type: "string" as const, description: "Section heading to read. Omit for TOC." },
+          },
+          required: [],
+        },
+      },
+    },
+    {
+      type: "function" as const,
+      function: {
+        name: "recall_exchange",
+        description: "Fetch raw conversation from a citation [exchange:ID].",
+        parameters: {
+          type: "object" as const,
+          properties: {
+            id: { type: "string" as const, description: 'Exchange ID, e.g., "sess0-turn3"' },
+          },
+          required: ["id"],
+        },
+      },
+    },
+  ];
+}
 
+// ══════════════════════════════════════════════
+// TOOL EXECUTION (shared between indexing + answering)
+// ══════════════════════════════════════════════
+
+function executeToolCall(
+  notepad: NotepadMemory,
+  toolName: string,
+  args: Record<string, unknown>
+): string {
+  switch (toolName) {
+    case "write_notes": {
+      const notes = args.notes as { sectionPath: string; content: string; afterSection?: string }[];
+      const ops: NoteOperation[] = notes.map((n) => ({
+        sectionPath: n.sectionPath,
+        content: n.content,
+        afterSection: n.afterSection,
+      }));
+      notepad.writeNotes(ops);
+      return `Added ${ops.length} note(s). TOC:\n${notepad.getTOC()}`;
+    }
+    case "edit_notes": {
+      const result = notepad.editSection(args.section as string, args.content as string);
+      return result.ok ? `Updated "${args.section}".` : result.error!;
+    }
+    case "read_notes": {
+      if (!args.section) return `Table of Contents:\n${notepad.getTOC()}`;
+      const content = notepad.readSection(args.section as string);
+      return content !== null
+        ? content || "(section exists but has no direct content)"
+        : `Section "${args.section}" not found. TOC:\n${notepad.getTOC()}`;
+    }
+    case "recall_exchange": {
+      const exchange = notepad.getExchange(args.id as string);
+      return exchange ?? `Exchange "${args.id}" not found.`;
+    }
+    default:
+      return `Unknown tool: ${toolName}`;
+  }
+}
+
+// ══════════════════════════════════════════════
+// DATASET HELPERS
+// ══════════════════════════════════════════════
+
+export async function loadDataset(dataset: string = "oracle"): Promise<EvalItem[]> {
+  const dataPath = dataset === "s"
+    ? "data/longmemeval_s_cleaned.json"
+    : "data/longmemeval_oracle.json";
   return await Bun.file(dataPath).json();
 }
 
-/**
- * Select a subset of items for evaluation.
- *
- * If type is specified, filters to that type. If count is a number,
- * takes N per type for balanced evaluation.
- */
 export function selectItems(
   allItems: EvalItem[],
   count: number | "all",
   type?: string
 ): EvalItem[] {
-  let items = type
-    ? allItems.filter((i) => i.question_type === type)
-    : allItems;
+  let items = type ? allItems.filter((i) => i.question_type === type) : allItems;
 
   if (count !== "all") {
     if (type) {
@@ -192,12 +282,9 @@ export function selectItems(
     } else {
       const byType = new Map<string, EvalItem[]>();
       for (const item of items) {
-        if (!byType.has(item.question_type)) {
-          byType.set(item.question_type, []);
-        }
+        if (!byType.has(item.question_type)) byType.set(item.question_type, []);
         byType.get(item.question_type)!.push(item);
       }
-
       items = [];
       for (const [, typeItems] of byType) {
         items.push(...typeItems.slice(0, count));
@@ -208,44 +295,23 @@ export function selectItems(
   return items;
 }
 
-/**
- * Count total turn pairs in an eval item (for progress reporting).
- */
-export function countTurnPairs(item: EvalItem): number {
-  let count = 0;
-  for (const session of item.haystack_sessions) {
-    const turns = Object.values(session) as Turn[];
-    count += Math.ceil(turns.length / 2);
-  }
-  return count;
-}
+// ══════════════════════════════════════════════
+// CORE EVALUATION
+// ══════════════════════════════════════════════
 
-/**
- * Callback fired after each turn during evaluation.
- * Used by the SSE server to stream turn-level progress.
- */
-export type OnTurnCallback = (snapshot: TurnSnapshot, totalTurns: number) => void;
-
-/**
- * Evaluate a single LongMemEval question.
- * Captures turn-level snapshots for visualization.
- *
- * @param item — the question to evaluate
- * @param onTurn — optional callback fired after each turn completes
- */
 export async function evaluateQuestion(
   item: EvalItem,
   onTurn?: OnTurnCallback
 ): Promise<EvalResult> {
-  const hipporag = new HippoRAG();
-  const compactMemory = new CompactMemory();
+  const notepad = new NotepadMemory();
   let conversationBuffer = "";
-  let pendingExchanges: string[] = [];
+  let pendingExchanges: { id: string; text: string }[] = [];
   const turns: TurnSnapshot[] = [];
   let globalTurnIndex = 0;
 
   const totalTurns = countTurnPairs(item);
   const indexStart = Date.now();
+  const TOOLS = getEvalTools();
 
   for (let sessIdx = 0; sessIdx < item.haystack_sessions.length; sessIdx++) {
     const session = item.haystack_sessions[sessIdx]!;
@@ -255,46 +321,72 @@ export async function evaluateQuestion(
     for (let t = 0; t < sessionTurns.length; t += 2) {
       const userTurn = sessionTurns[t];
       const assistantTurn = sessionTurns[t + 1];
-
       if (!userTurn) continue;
 
-      // Prepend session date so summaries and triples carry temporal context
-      let exchangeText = sessionDate
-        ? `[Session: ${sessionDate}]\n`
-        : "";
+      let exchangeText = sessionDate ? `[Session: ${sessionDate}]\n` : "";
       exchangeText += `User: ${userTurn.content}`;
-      if (assistantTurn) {
-        exchangeText += `\nAssistant: ${assistantTurn.content}`;
-      }
+      if (assistantTurn) exchangeText += `\nAssistant: ${assistantTurn.content}`;
+
+      const exchangeId = `sess${sessIdx}-turn${Math.floor(t / 2)}`;
+      notepad.storeExchange(exchangeId, exchangeText);
 
       const bufferTokensBefore = estimateTokens(conversationBuffer);
+      conversationBuffer = notepad.append(conversationBuffer, exchangeText);
+      pendingExchanges.push({ id: exchangeId, text: exchangeText });
 
-      conversationBuffer = compactMemory.append(
-        conversationBuffer,
-        exchangeText
-      );
-      pendingExchanges.push(exchangeText);
-
-      // Capture peak token count AFTER append but BEFORE summarization
       const bufferTokensPeak = estimateTokens(conversationBuffer);
 
       let summarized = false;
       let summaryText: string | undefined;
 
-      if (compactMemory.shouldSummarize(conversationBuffer)) {
-        // Summarize each exchange individually (4:1, parallel)
-        const summaries = await compactMemory.summarizeExchanges(pendingExchanges);
-        // Index each summary into HippoRAG (parallel)
-        await Promise.all(summaries.map((s) => hipporag.index(s)));
-        summaryText = "[Summary of earlier conversation]\n" + summaries.join("\n\n");
-        conversationBuffer = summaryText;
+      // Check memory pressure — force note-writing via LLM
+      if (notepad.shouldSummarize(conversationBuffer) && pendingExchanges.length > 0) {
+        // Build a note-writing prompt identical to the forced write_notes flow
+        const toc = notepad.getTOC();
+        const rollingSummary = notepad.getRollingSummary();
+
+        const noteMessages: (SystemMessage | HumanMessage | AIMessage | ToolMessage)[] = [
+          new SystemMessage(
+            `You are a helpful assistant with a notepad for long-term memory.
+
+Your notepad (table of contents):
+${toc}
+
+${rollingSummary ? `Conversation summary: ${rollingSummary}` : ""}
+
+**Your memory buffer is full. You MUST call write_notes to process these pending exchanges into organized notes:**
+
+${pendingExchanges.map((e) => `[exchange:${e.id}]\n${e.text}`).join("\n\n")}
+
+Process these into organized notes with citations, then respond with a brief acknowledgment.`
+          ),
+          new HumanMessage("Process the pending exchanges into notes."),
+        ];
+
+        // Let the LLM write notes (up to 3 tool calls)
+        for (let i = 0; i < 3; i++) {
+          const resp = await llm.invoke(noteMessages, { tools: TOOLS });
+          const tc = resp.tool_calls;
+          if (!tc || tc.length === 0) break;
+
+          noteMessages.push(resp);
+          for (const call of tc) {
+            const result = executeToolCall(notepad, call.name, call.args as Record<string, unknown>);
+            noteMessages.push(new ToolMessage({ tool_call_id: call.id ?? `idx_${i}`, content: result }));
+          }
+        }
+
+        // Generate rolling summary and compress buffer
+        await notepad.updateRollingSummary(conversationBuffer);
+        summaryText = notepad.getRollingSummary();
+        conversationBuffer = "[Summary]\n" + summaryText;
         pendingExchanges = [];
+        notepad.resetReadTracking();
         summarized = true;
-        hipporag.forget();
       }
 
       const bufferTokensAfter = estimateTokens(conversationBuffer);
-      const kgStats = hipporag.getStats();
+      const notepadStats = notepad.getStats();
 
       const snapshot: TurnSnapshot = {
         turnIndex: globalTurnIndex++,
@@ -305,91 +397,93 @@ export async function evaluateQuestion(
         bufferTokensAfter,
         summarized,
         summaryText,
-        kgStats: {
-          passages: kgStats.passages,
-          entities: kgStats.entities,
-          facts: kgStats.facts,
-        },
+        notepadStats,
       };
 
       turns.push(snapshot);
       onTurn?.(snapshot, totalTurns);
     }
 
-    // ── Session boundary: flush everything into HippoRAG ──
-    // Each session is a separate conversation (like a new ChatGPT thread).
-    // Summarize each pending exchange, then index summaries into long-term memory.
-    // HippoRAG is the only memory that persists across sessions.
+    // ── Session boundary: flush pending exchanges as notes ──
     if (pendingExchanges.length > 0) {
-      const summaries = await compactMemory.summarizeExchanges(pendingExchanges);
-      await Promise.all(summaries.map((s) => hipporag.index(s)));
+      const toc = notepad.getTOC();
+      const rollingSummary = notepad.getRollingSummary();
+
+      const noteMessages: (SystemMessage | HumanMessage | AIMessage | ToolMessage)[] = [
+        new SystemMessage(
+          `You are a helpful assistant with a notepad. Process these exchanges into notes.
+
+Your notepad TOC:
+${toc}
+
+${rollingSummary ? `Summary: ${rollingSummary}` : ""}
+
+Pending exchanges:
+${pendingExchanges.map((e) => `[exchange:${e.id}]\n${e.text}`).join("\n\n")}
+
+Call write_notes to save important information, then respond briefly.`
+        ),
+        new HumanMessage("Process these exchanges into notes."),
+      ];
+
+      for (let i = 0; i < 3; i++) {
+        const resp = await llm.invoke(noteMessages, { tools: TOOLS });
+        const tc = resp.tool_calls;
+        if (!tc || tc.length === 0) break;
+        noteMessages.push(resp);
+        for (const call of tc) {
+          const result = executeToolCall(notepad, call.name, call.args as Record<string, unknown>);
+          noteMessages.push(new ToolMessage({ tool_call_id: call.id ?? `flush_${i}`, content: result }));
+        }
+      }
+
       pendingExchanges = [];
     }
     conversationBuffer = "";
-    hipporag.forget();
+    notepad.newSession();
   }
 
   const indexingTimeMs = Date.now() - indexStart;
 
-  // ── Agent-driven retrieval + answer generation ──
-  // Same tool-calling loop as the live agent. The LLM decides whether
-  // to call remember based on the question and conversation context.
+  // ══════════════════════════════════════════════
+  // ANSWER GENERATION (same tool-calling flow as live agent)
+  // ══════════════════════════════════════════════
 
-  const REMEMBER_TOOL = {
-    type: "function" as const,
-    function: {
-      name: "remember",
-      description:
-        "Search long-term memory for relevant information. " +
-        "Finds entity associations and retrieves full conversation summaries " +
-        "from past sessions. Pass a focused, specific query.",
-      parameters: {
-        type: "object" as const,
-        properties: {
-          query: {
-            type: "string" as const,
-            description: "A focused query to search memory for.",
-          },
-        },
-        required: ["query"],
-      },
-    },
-  };
+  const toc = notepad.getTOC();
+  const rollingSummary = notepad.getRollingSummary();
 
-  const memoryParts: string[] = [];
-  if (conversationBuffer) {
-    memoryParts.push(`Conversation so far:\n${conversationBuffer}`);
-  }
-  const memoryBlock = memoryParts.join("\n\n");
+  const contextParts: string[] = [];
+  if (rollingSummary) contextParts.push(`Conversation summary: ${rollingSummary}`);
+  if (conversationBuffer) contextParts.push(`Recent conversation:\n${conversationBuffer}`);
+  contextParts.push(`Your notepad (table of contents):\n${toc}`);
 
   const messages: (SystemMessage | HumanMessage | AIMessage | ToolMessage)[] = [
     new SystemMessage(
-      `You are a helpful, friendly assistant with long-term memory.
+      `You are a helpful, friendly assistant with a notepad for long-term memory.
 
-You have a memory tool: **remember** — searches past conversations for relevant information.
+You have four tools:
+- **write_notes** — add new notes
+- **edit_notes** — update an existing section (must read first)
+- **read_notes** — read a section's content, or get the table of contents
+- **recall_exchange** — fetch raw conversation from a citation [exchange:ID]
 
-How to use it:
-- Use it when the user asks about something from the past or you need context from prior conversations.
-- For complex questions (counting, listing, comparing across topics), break the question into specific sub-queries and call remember multiple times with different focused queries. Each call searches different parts of memory.
-- Use specific, focused queries — "user's 5K race personal best" not "running".
-- For casual conversation, just respond directly without using the tool.
+For recall questions, read relevant notepad sections. For counting/listing, read multiple sections thoroughly.
 
-Do NOT mention your memory tool or system. Just respond naturally.
+Do NOT mention your notepad or tools. Just respond naturally.
 
-${memoryBlock ? `--- Current Session ---\n${memoryBlock}\n--- End Session ---` : "(New conversation — no prior context.)"}`
+--- Your Memory ---
+${contextParts.join("\n\n")}
+--- End Memory ---`
     ),
     new HumanMessage(item.question),
   ];
 
   const toolCallTraces: ToolCallTrace[] = [];
   const retrievalStart = Date.now();
-
-  const maxToolCalls = 3;
   let generatedAnswer = "";
 
-  for (let i = 0; i < maxToolCalls; i++) {
-    const response = await llm.invoke(messages, { tools: [REMEMBER_TOOL] });
-
+  for (let i = 0; i < 8; i++) {
+    const response = await llm.invoke(messages, { tools: TOOLS });
     const toolCalls = response.tool_calls;
 
     if (!toolCalls || toolCalls.length === 0) {
@@ -406,55 +500,28 @@ ${memoryBlock ? `--- Current Session ---\n${memoryBlock}\n--- End Session ---` :
     messages.push(response);
 
     for (const toolCall of toolCalls) {
-      if (toolCall.name === "remember") {
-        const query = (toolCall.args as { query: string }).query;
-        const callStart = Date.now();
+      const callStart = Date.now();
+      const result = executeToolCall(notepad, toolCall.name, toolCall.args as Record<string, unknown>);
 
-        // Full pipeline: recognize (top-25 + LLM filter) → recall (PPR)
-        const passages = await hipporag.retrieve(query);
+      toolCallTraces.push({
+        tool: toolCall.name,
+        query: JSON.stringify(toolCall.args),
+        result,
+        durationMs: Date.now() - callStart,
+      });
 
-        const result =
-          passages.length > 0
-            ? passages
-                .map((p, idx) => `[Memory ${idx + 1}]: ${p.text}`)
-                .join("\n\n")
-            : "No relevant memories found.";
-
-        toolCallTraces.push({
-          tool: "remember",
-          query,
-          result,
-          durationMs: Date.now() - callStart,
-        });
-
-        messages.push(
-          new ToolMessage({
-            tool_call_id: toolCall.id ?? `call_${i}`,
-            content: result,
-          })
-        );
-      }
+      messages.push(new ToolMessage({ tool_call_id: toolCall.id ?? `ans_${i}`, content: result }));
     }
   }
 
   const retrievalTimeMs = Date.now() - retrievalStart;
 
-  const retrieval: RetrievalTrace = {
-    toolCalls: toolCallTraces,
-    totalRetrievalMs: retrievalTimeMs,
-  };
-
   if (!generatedAnswer) {
     generatedAnswer = "I'm having trouble recalling. Could you rephrase?";
   }
 
-  const correct = await judgeAnswer(
-    item.question,
-    item.answer,
-    generatedAnswer
-  );
-
-  const stats = hipporag.getStats();
+  const correct = await judgeAnswer(item.question, item.answer, generatedAnswer);
+  const stats = notepad.getStats();
 
   return {
     questionId: item.question_id,
@@ -463,21 +530,19 @@ ${memoryBlock ? `--- Current Session ---\n${memoryBlock}\n--- End Session ---` :
     expectedAnswer: item.answer,
     generatedAnswer,
     correct,
-    retrievedContext: toolCallTraces
-      .map((t) => t.result)
-      .join("\n\n"),
+    retrievedContext: toolCallTraces.map((t) => t.result).join("\n\n"),
     conversationBuffer,
+    notepadContent: notepad.getFullContent(),
     stats,
     indexingTimeMs,
     retrievalTimeMs,
     turns,
-    retrieval,
+    retrieval: { toolCalls: toolCallTraces, totalRetrievalMs: retrievalTimeMs },
   };
 }
 
 // ══════════════════════════════════════════════
-// CLI ENTRYPOINT
-// Only runs when executed directly (not imported)
+// CLI
 // ══════════════════════════════════════════════
 
 function parseArgs(): { count: number | "all"; type?: string; dataset: string } {
@@ -514,11 +579,10 @@ async function main() {
   console.log(`Running evaluation on ${items.length} questions...\n`);
 
   const results: EvalResult[] = [];
-  let completed = 0;
 
-  for (const item of items) {
-    completed++;
-    const prefix = `[${completed}/${items.length}]`;
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i]!;
+    const prefix = `[${i + 1}/${items.length}]`;
 
     try {
       process.stdout.write(
@@ -529,23 +593,20 @@ async function main() {
       results.push(result);
 
       const mark = result.correct ? "PASS" : "FAIL";
-      const kg = result.stats;
+      const s = result.stats;
       console.log(
-        `${mark} (${kg.entities}e/${kg.facts}f, idx:${(result.indexingTimeMs / 1000).toFixed(0)}s, ret:${(result.retrievalTimeMs / 1000).toFixed(0)}s)`
+        `${mark} (${s.sectionCount}s/${s.notepadTokens}t, idx:${(result.indexingTimeMs / 1000).toFixed(0)}s, ret:${(result.retrievalTimeMs / 1000).toFixed(0)}s)`
       );
 
       if (!result.correct) {
         console.log(`       Expected: ${result.expectedAnswer}`);
-        console.log(
-          `       Got:      ${result.generatedAnswer.slice(0, 120)}...`
-        );
+        console.log(`       Got:      ${result.generatedAnswer.slice(0, 120)}...`);
       }
     } catch (error) {
       console.log(`ERROR: ${error}`);
     }
   }
 
-  // Report
   console.log("\n" + "=".repeat(70));
   const totalCorrect = results.filter((r) => r.correct).length;
   console.log(
@@ -558,7 +619,6 @@ async function main() {
   console.log(`Results saved to ${outputPath}`);
 }
 
-// Only run CLI if this file is the entrypoint (not imported by server)
 const isMainModule = import.meta.path === Bun.main;
 if (isMainModule) {
   main().catch((err) => {

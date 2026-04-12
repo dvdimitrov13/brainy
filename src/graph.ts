@@ -1,20 +1,15 @@
 /**
  * graph.ts — LangGraph StateGraph definition.
  *
- * The graph is a two-node pipeline:
+ * The graph has a conditional loop for memory pressure:
  *
- *   START → respond → memorize → END
+ *   START → respond → memorize → END        (normal flow)
+ *   START → respond → memorize → respond     (pressure: must write notes)
  *
- * The respond node has access to two tools (recognize + recall) that
- * it calls as needed. No automatic memory injection — the agent
- * decides when to search its memory.
- *
- * TS note for Python devs:
- *   - `StateGraph(StateAnnotation)` is like `StateGraph(TypedDict)` in Python
- *   - `.addNode("name", func)` registers a node function
- *   - `.addEdge(A, B)` means "after A finishes, run B"
- *   - `START` and `END` are special constants for the graph entry/exit
- *   - `.compile()` returns an executable graph (like building a pipeline)
+ * When the memorize node detects buffer pressure, it sets mustWriteNotes
+ * and the graph loops back to respond. The respond node forces the agent
+ * to call write_notes, then proceeds to memorize again which clears the
+ * pressure and routes to END.
  */
 
 import { StateGraph, START, END } from "@langchain/langgraph";
@@ -24,18 +19,19 @@ import { memorizeNode } from "./nodes/memorize.ts";
 
 /**
  * Build and compile the Brainy conversation graph.
- *
- * @returns a compiled graph that can be invoked with `graph.invoke(state)`
  */
 export function buildGraph() {
   const graph = new StateGraph(BrainyState)
     .addNode("respond", respondNode)
     .addNode("memorize", memorizeNode)
 
-    // START → respond (with tool calls) → memorize → END
     .addEdge(START, "respond")
     .addEdge("respond", "memorize")
-    .addEdge("memorize", END)
+
+    // Conditional edge: memorize → respond (if pressure) or memorize → END
+    .addConditionalEdges("memorize", (state) => {
+      return state.mustWriteNotes ? "respond" : "__end__";
+    })
 
     .compile();
 
