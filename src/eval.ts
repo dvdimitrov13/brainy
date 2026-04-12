@@ -12,7 +12,7 @@
  */
 
 import { NotepadMemory } from "./memory/notepad.ts";
-import type { NoteOperation } from "./memory/notepad.ts";
+import type { NoteEntry } from "./memory/notepad-ops.ts";
 import { llm } from "./llm.ts";
 import {
   HumanMessage,
@@ -52,7 +52,7 @@ export interface TurnSnapshot {
   bufferTokensAfter: number;
   summarized: boolean;
   summaryText?: string;
-  notepadStats: { notepadTokens: number; exchangeCount: number; sectionCount: number };
+  notepadStats: { notepadTokens: number; exchangeCount: number; noteCount: number };
 }
 
 export interface ToolCallTrace {
@@ -77,7 +77,7 @@ export interface EvalResult {
   retrievedContext: string;
   conversationBuffer: string;
   notepadContent: string;
-  stats: { notepadTokens: number; exchangeCount: number; sectionCount: number };
+  stats: { notepadTokens: number; exchangeCount: number; noteCount: number };
   indexingTimeMs: number;
   retrievalTimeMs: number;
   turns: TurnSnapshot[];
@@ -151,7 +151,8 @@ function getEvalTools() {
       function: {
         name: "write_notes",
         description:
-          "Add new notes to your notepad. Only note top-level facts (user decisions, purchases, goals, dates, preferences — NOT generic advice). Keep 1-3 lines each, cite [exchange:ID]. Check TOC first to avoid duplicates.",
+          "Add notes to your notepad. One note per fact, self-contained with date and citation. " +
+          "Only note user facts — not generic advice. Keep 1-2 lines each.",
         parameters: {
           type: "object" as const,
           properties: {
@@ -160,11 +161,11 @@ function getEvalTools() {
               items: {
                 type: "object" as const,
                 properties: {
-                  sectionPath: { type: "string" as const, description: "Hierarchical path: Topic/Subtopic" },
-                  content: { type: "string" as const, description: "Note content with citations [exchange:ID]" },
-                  afterSection: { type: "string" as const, description: "Optional: place after this section" },
+                  date: { type: "string" as const, description: "When this fact occurred" },
+                  content: { type: "string" as const, description: "Self-contained factual note (1-2 lines)" },
+                  citations: { type: "array" as const, items: { type: "string" as const }, description: "Source exchange IDs" },
                 },
-                required: ["sectionPath", "content"],
+                required: ["date", "content", "citations"],
               },
             },
           },
@@ -176,14 +177,14 @@ function getEvalTools() {
       type: "function" as const,
       function: {
         name: "edit_notes",
-        description: "Update an existing section. Must read it first with read_notes.",
+        description: "Update an existing note by number. Must read it first with read_notes.",
         parameters: {
           type: "object" as const,
           properties: {
-            section: { type: "string" as const },
-            content: { type: "string" as const },
+            note_number: { type: "number" as const, description: "Note number to edit" },
+            content: { type: "string" as const, description: "Updated content" },
           },
-          required: ["section", "content"],
+          required: ["note_number", "content"],
         },
       },
     },
@@ -191,11 +192,11 @@ function getEvalTools() {
       type: "function" as const,
       function: {
         name: "read_notes",
-        description: "Read a section's content (not subsections). Omit section to get TOC.",
+        description: "Read notes. Provide a query to search, or omit to read all notes.",
         parameters: {
           type: "object" as const,
           properties: {
-            section: { type: "string" as const, description: "Section heading to read. Omit for TOC." },
+            query: { type: "string" as const, description: "Keyword search. Omit to read all." },
           },
           required: [],
         },
@@ -219,7 +220,7 @@ function getEvalTools() {
 }
 
 // ══════════════════════════════════════════════
-// TOOL EXECUTION (shared between indexing + answering)
+// TOOL EXECUTION
 // ══════════════════════════════════════════════
 
 function executeToolCall(
@@ -229,25 +230,22 @@ function executeToolCall(
 ): string {
   switch (toolName) {
     case "write_notes": {
-      const notes = args.notes as { sectionPath: string; content: string; afterSection?: string }[];
-      const ops: NoteOperation[] = notes.map((n) => ({
-        sectionPath: n.sectionPath,
+      const notes = args.notes as { date: string; content: string; citations: string[] }[];
+      const entries: NoteEntry[] = notes.map((n) => ({
+        date: n.date,
         content: n.content,
-        afterSection: n.afterSection,
+        citations: n.citations,
       }));
-      notepad.writeNotes(ops);
-      return `Added ${ops.length} note(s). TOC:\n${notepad.getTOC()}`;
+      notepad.writeNotes(entries);
+      return `Added ${entries.length} note(s). Notepad now has ${notepad.getStats().noteCount} notes.`;
     }
     case "edit_notes": {
-      const result = notepad.editSection(args.section as string, args.content as string);
-      return result.ok ? `Updated "${args.section}".` : result.error!;
+      const result = notepad.editNote(args.note_number as number, args.content as string);
+      return result.ok ? `Updated note #${args.note_number}.` : result.error!;
     }
     case "read_notes": {
-      if (!args.section) return `Table of Contents:\n${notepad.getTOC()}`;
-      const content = notepad.readSection(args.section as string);
-      return content !== null
-        ? content || "(section exists but has no direct content)"
-        : `Section "${args.section}" not found. TOC:\n${notepad.getTOC()}`;
+      if (args.query) return notepad.search(args.query as string);
+      return notepad.getAllNotes();
     }
     case "recall_exchange": {
       const exchange = notepad.getExchange(args.id as string);
@@ -342,14 +340,14 @@ export async function evaluateQuestion(
       // Check memory pressure — force note-writing via LLM
       if (notepad.shouldSummarize(conversationBuffer) && pendingExchanges.length > 0) {
         // Build a note-writing prompt identical to the forced write_notes flow
-        const toc = notepad.getTOC();
+        const toc = notepad.getIndex();
         const rollingSummary = notepad.getRollingSummary();
 
         const noteMessages: (SystemMessage | HumanMessage | AIMessage | ToolMessage)[] = [
           new SystemMessage(
             `You are a helpful assistant with a notepad for long-term memory.
 
-Your notepad (table of contents):
+Your notepad index:
 ${toc}
 
 ${rollingSummary ? `Conversation summary: ${rollingSummary}` : ""}
@@ -357,17 +355,17 @@ ${rollingSummary ? `Conversation summary: ${rollingSummary}` : ""}
 **Your memory buffer is full. You MUST call write_notes to process these pending exchanges into notes.**
 
 Note-taking rules:
-- Only note TOP-LEVEL FACTS: user decisions, purchases, goals, preferences, events, dates, numbers
+- Write one note per distinct fact — self-contained with enough context to be findable from any angle
+- Include the date from the session header
+- Only note facts about the user: decisions, purchases, goals, events, dates, numbers, preferences
 - Do NOT note generic advice you gave — you can regenerate that anytime
-- Keep each note to 1-3 lines — cite [exchange:ID] so you can recall details later
-- Include dates/times from the session headers
-- Check the TOC first — if a relevant section exists, use edit_notes to update it instead of creating duplicates
-- Organize hierarchically: use consistent top-level categories with subtopics
+- Keep each note to 1-2 lines — cite [exchange:ID] for detail recall later
+- Check existing notes first (use read_notes) to avoid duplicates
 
 Pending exchanges:
 ${pendingExchanges.map((e) => `[exchange:${e.id}]\n${e.text}`).join("\n\n")}
 
-Process these into organized notes, then respond briefly.`
+Process these into notes, then respond briefly.`
           ),
           new HumanMessage("Process the pending exchanges into notes."),
         ];
@@ -415,25 +413,24 @@ Process these into organized notes, then respond briefly.`
 
     // ── Session boundary: flush pending exchanges as notes ──
     if (pendingExchanges.length > 0) {
-      const toc = notepad.getTOC();
+      const toc = notepad.getIndex();
       const rollingSummary = notepad.getRollingSummary();
 
       const noteMessages: (SystemMessage | HumanMessage | AIMessage | ToolMessage)[] = [
         new SystemMessage(
           `You are a helpful assistant with a notepad. Process these exchanges into notes.
 
-Your notepad TOC:
+Your notepad index:
 ${toc}
 
 ${rollingSummary ? `Summary: ${rollingSummary}` : ""}
 
 Note-taking rules:
-- Only note TOP-LEVEL FACTS: user decisions, purchases, goals, preferences, events, dates, numbers
-- Do NOT note generic advice you gave — you can regenerate that anytime
-- Keep each note to 1-3 lines — cite [exchange:ID] so you can recall details later
-- Include dates/times from the session headers
-- Check the TOC first — if a relevant section exists, use edit_notes to update it instead of creating duplicates
-- Organize hierarchically: use consistent top-level categories with subtopics
+- Write one note per distinct fact — self-contained, findable from any angle
+- Include the date from the session header
+- Only note user facts: decisions, purchases, goals, events, dates, numbers, preferences
+- Do NOT note generic advice — keep 1-2 lines each with [exchange:ID] citation
+- Check existing notes (use read_notes) to avoid duplicates
 
 Pending exchanges:
 ${pendingExchanges.map((e) => `[exchange:${e.id}]\n${e.text}`).join("\n\n")}
@@ -471,25 +468,25 @@ Call write_notes to save important information, then respond briefly.`
   // ANSWER GENERATION (same tool-calling flow as live agent)
   // ══════════════════════════════════════════════
 
-  const toc = notepad.getTOC();
+  const toc = notepad.getIndex();
   const rollingSummary = notepad.getRollingSummary();
 
   const contextParts: string[] = [];
   if (rollingSummary) contextParts.push(`Conversation summary: ${rollingSummary}`);
   if (conversationBuffer) contextParts.push(`Recent conversation:\n${conversationBuffer}`);
-  contextParts.push(`Your notepad (table of contents):\n${toc}`);
+  contextParts.push(`Your notepad index:\n${toc}`);
 
   const messages: (SystemMessage | HumanMessage | AIMessage | ToolMessage)[] = [
     new SystemMessage(
       `You are a helpful, friendly assistant with a notepad for long-term memory.
 
 You have four tools:
-- **write_notes** — add new notes
-- **edit_notes** — update an existing section (must read first)
-- **read_notes** — read a section's content, or get the table of contents
+- **write_notes** — add new notes (one per fact, with date and citation)
+- **edit_notes** — update a note by number (must read first)
+- **read_notes** — search by keyword, or read all notes
 - **recall_exchange** — fetch raw conversation from a citation [exchange:ID]
 
-For recall questions, read relevant notepad sections. For counting/listing, read multiple sections thoroughly.
+For recall questions, use read_notes to search or read all. For counting/listing, read all notes.
 
 Do NOT mention your notepad or tools. Just respond naturally.
 
@@ -617,7 +614,7 @@ async function main() {
       const mark = result.correct ? "PASS" : "FAIL";
       const s = result.stats;
       console.log(
-        `${mark} (${s.sectionCount}s/${s.notepadTokens}t, idx:${(result.indexingTimeMs / 1000).toFixed(0)}s, ret:${(result.retrievalTimeMs / 1000).toFixed(0)}s)`
+        `${mark} (${s.noteCount}s/${s.notepadTokens}t, idx:${(result.indexingTimeMs / 1000).toFixed(0)}s, ret:${(result.retrievalTimeMs / 1000).toFixed(0)}s)`
       );
 
       if (!result.correct) {

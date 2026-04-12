@@ -89,14 +89,14 @@ async function main() {
       if (trimmed.toLowerCase() === "stats") {
         const stats = notepadMemory.getStats();
         console.log("\n--- Memory Stats ---");
-        console.log(`Notepad sections: ${stats.sectionCount}`);
+        console.log(`Notes:            ${stats.noteCount}`);
         console.log(`Notepad tokens:   ${stats.notepadTokens}`);
         console.log(`Exchanges stored: ${stats.exchangeCount}`);
         console.log(`Turn count:       ${(currentState.turnCount as number) ?? 0}`);
         const buf = (currentState.conversationBuffer as string) || "";
         const bufTokens = Math.ceil(buf.length / 4);
         console.log(`Buffer tokens:    ~${bufTokens} / 1024`);
-        console.log(`TOC:\n${notepadMemory.getTOC()}`);
+        console.log(`Index:\n${notepadMemory.getIndex()}`);
         console.log("---\n");
         askQuestion();
         return;

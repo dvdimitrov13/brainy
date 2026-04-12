@@ -1,65 +1,54 @@
 /**
- * notepad.ts — Structured markdown notepad for long-term memory.
+ * notepad.ts — Flat chronological notepad for long-term memory.
  *
- * Replaces HippoRAG with a simpler approach: the agent maintains a
- * markdown document like a person taking notes. No embeddings, no
- * graph algorithms — just structured text the agent can read, write,
- * and edit through tools.
+ * The notepad is a flat list of self-contained notes, each with:
+ *   - A date (when the fact occurred)
+ *   - Dense content (the fact, with enough context to be findable)
+ *   - Citation(s) to source exchanges
  *
- * The notepad has:
- *   - Hierarchical sections organized by topic
- *   - Auto-generated table of contents
- *   - Citations linking notes to source exchanges [exchange:sess0-turn3]
- *   - Raw exchange storage for drilling into citations
- *   - Rolling summary for conversational continuity
- *   - Read tracking to prevent blind edits (must read before edit)
+ * No hierarchy — each note stands alone. A fact like "Viewed Cedar Creek
+ * property — out of budget" is findable whether you're looking for
+ * "properties viewed", "budget", or "Cedar Creek".
+ *
+ * The agent can:
+ *   - write_notes: add new flat entries
+ *   - read_notes: get full notepad or search by keyword
+ *   - edit_notes: update a note by index (must read first)
+ *   - recall_exchange: fetch raw exchange from citation
  */
 
 import { llmFast } from "../llm.ts";
+import type { NoteEntry } from "./notepad-ops.ts";
 import {
-  generateTOC,
-  insertSection,
-  updateSection,
-  extractSection,
-  countSections,
+  formatNotepad,
+  generateIndex,
+  searchNotes,
   estimateTokens,
 } from "./notepad-ops.ts";
-
-/** A note operation the agent wants to apply */
-export interface NoteOperation {
-  /** Hierarchical path: "Company/Team" or "Personal/Preferences" */
-  sectionPath: string;
-  /** The note content (markdown, with [exchange:ID] citations) */
-  content: string;
-  /** Optional: place this section after the named section */
-  afterSection?: string;
-}
 
 /** Token threshold for conversation buffer pressure */
 const TOKEN_THRESHOLD = 1024;
 
 export class NotepadMemory {
-  /** The full markdown notepad (without TOC — TOC is generated on read) */
-  private body: string = "";
-  /** Raw exchanges stored by ID for recall_exchange tool */
+  /** Flat chronological list of notes */
+  private notes: NoteEntry[] = [];
+  /** Raw exchanges stored by ID for recall */
   private exchanges: Map<string, string> = new Map();
-  /** Rolling summary of conversation so far */
+  /** Rolling summary of conversation */
   private rollingSummary: string = "";
-  /** Current session index (incremented at session boundaries) */
+  /** Current session index */
   private currentSession: number = 0;
-  /** Sections the agent has read in the current buffer cycle */
-  private readSections: Set<string> = new Set();
+  /** Note indices that have been read (for edit failsafe) */
+  private readNoteIndices: Set<number> = new Set();
 
   // ══════════════════════════════════════════════
   // BUFFER MANAGEMENT
   // ══════════════════════════════════════════════
 
-  /** Check if the conversation buffer has exceeded pressure threshold */
   shouldSummarize(buffer: string): boolean {
     return estimateTokens(buffer) > TOKEN_THRESHOLD;
   }
 
-  /** Append a new exchange to the conversation buffer */
   append(currentBuffer: string, newExchange: string): string {
     if (!currentBuffer) return newExchange;
     return `${currentBuffer}\n\n${newExchange}`;
@@ -70,24 +59,42 @@ export class NotepadMemory {
   // ══════════════════════════════════════════════
 
   /**
-   * Get the table of contents.
-   * This is always injected into the system prompt so the agent
-   * knows what sections exist in the notepad.
+   * Get the notepad index — a compact scannable summary.
+   * Always injected into the system prompt.
    */
-  getTOC(): string {
-    return generateTOC(this.body) || "(empty notepad)";
+  getIndex(): string {
+    return generateIndex(this.notes);
   }
 
   /**
-   * Read a section's direct content (no subsections).
-   * Marks the section as "read" so edit_notes can modify it.
+   * Get all notes formatted as a readable list.
+   * Marks all notes as "read" for edit purposes.
    */
-  readSection(heading: string): string | null {
-    const content = extractSection(this.body, heading);
-    if (content !== null) {
-      this.readSections.add(heading.toLowerCase());
+  getAllNotes(): string {
+    for (let i = 0; i < this.notes.length; i++) {
+      this.readNoteIndices.add(i);
     }
-    return content;
+    return formatNotepad(this.notes);
+  }
+
+  /**
+   * Search notes by keyword query.
+   * Returns matching notes. Marks them as read.
+   */
+  search(query: string): string {
+    const results = searchNotes(this.notes, query);
+    if (results.length === 0) return "No matching notes found.";
+
+    for (const { index } of results) {
+      this.readNoteIndices.add(index);
+    }
+
+    return results
+      .map(
+        ({ index, note }) =>
+          `${index + 1}. [${note.date}] ${note.content} ${note.citations.map((c) => `[exchange:${c}]`).join(" ")}`
+      )
+      .join("\n");
   }
 
   /** Get a raw exchange by citation ID */
@@ -100,67 +107,54 @@ export class NotepadMemory {
     return this.rollingSummary;
   }
 
-  /** Get the full notepad markdown (for debugging/viz) */
+  /** Get full notepad content (for debugging/viz) */
   getFullContent(): string {
-    return this.body;
+    return formatNotepad(this.notes);
   }
 
   // ══════════════════════════════════════════════
   // WRITING
   // ══════════════════════════════════════════════
 
-  /** Store a raw exchange by ID for future recall */
+  /** Store a raw exchange by ID */
   storeExchange(id: string, text: string): void {
     this.exchanges.set(id, text);
   }
 
   /**
-   * Apply note operations to the notepad.
-   * Each operation inserts a new section at the specified path.
-   * TOC is regenerated automatically after all operations.
+   * Add new notes to the notepad.
+   * Notes are appended chronologically.
    */
-  writeNotes(operations: NoteOperation[]): void {
-    for (const op of operations) {
-      this.body = insertSection(
-        this.body,
-        op.sectionPath,
-        op.content,
-        op.afterSection
-      );
-    }
+  writeNotes(entries: NoteEntry[]): void {
+    this.notes.push(...entries);
+    // Sort by date for chronological order
+    this.notes.sort((a, b) => a.date.localeCompare(b.date));
   }
 
   /**
-   * Edit an existing section's content.
-   * Returns an error if the section hasn't been read first.
+   * Edit an existing note by index (1-based).
+   * Must have been read first via getAllNotes or search.
    */
-  editSection(
-    heading: string,
+  editNote(
+    index: number,
     content: string
   ): { ok: boolean; error?: string } {
-    if (!this.canEdit(heading)) {
+    const idx = index - 1; // convert to 0-based
+    if (idx < 0 || idx >= this.notes.length) {
+      return { ok: false, error: `Note #${index} does not exist.` };
+    }
+    if (!this.readNoteIndices.has(idx)) {
       return {
         ok: false,
-        error: `Cannot edit "${heading}" — you must read it first with read_notes.`,
+        error: `Cannot edit note #${index} — you must read it first with read_notes.`,
       };
     }
-
-    const before = this.body;
-    this.body = updateSection(this.body, heading, content);
-
-    if (this.body === before) {
-      return {
-        ok: false,
-        error: `Section "${heading}" not found in the notepad.`,
-      };
-    }
-
+    this.notes[idx]!.content = content;
     return { ok: true };
   }
 
   /**
-   * Generate a rolling summary from the previous summary + conversation buffer.
-   * Called after write_notes clears memory pressure.
+   * Generate rolling summary from previous summary + conversation buffer.
    */
   async updateRollingSummary(buffer: string): Promise<void> {
     const response = await llmFast.invoke([
@@ -195,29 +189,21 @@ Respond with ONLY the summary.`,
   }
 
   // ══════════════════════════════════════════════
-  // READ TRACKING (edit failsafe)
+  // READ TRACKING
   // ══════════════════════════════════════════════
 
-  /** Check if a section has been read in the current buffer cycle */
-  canEdit(section: string): boolean {
-    return this.readSections.has(section.toLowerCase());
-  }
-
-  /** Reset read tracking (called after buffer compression) */
   resetReadTracking(): void {
-    this.readSections.clear();
+    this.readNoteIndices.clear();
   }
 
   // ══════════════════════════════════════════════
   // SESSION MANAGEMENT
   // ══════════════════════════════════════════════
 
-  /** Start a new session (called at session boundaries) */
   newSession(): void {
     this.currentSession++;
   }
 
-  /** Get the current session index */
   getSessionIndex(): number {
     return this.currentSession;
   }
@@ -229,12 +215,13 @@ Respond with ONLY the summary.`,
   getStats(): {
     notepadTokens: number;
     exchangeCount: number;
-    sectionCount: number;
+    noteCount: number;
   } {
+    const content = formatNotepad(this.notes);
     return {
-      notepadTokens: estimateTokens(this.body),
+      notepadTokens: estimateTokens(content),
       exchangeCount: this.exchanges.size,
-      sectionCount: countSections(this.body),
+      noteCount: this.notes.length,
     };
   }
 }

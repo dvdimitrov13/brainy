@@ -93,7 +93,7 @@ export default function LiveProgress({
                     <span className="summarize-badge">SUMMARIZED</span>
                   )}
                   <span className="kg-info">
-                    {snap.notepadStats.sectionCount}s / {snap.notepadStats.notepadTokens}t
+                    {snap.notepadStats.noteCount}s / {snap.notepadStats.notepadTokens}t
                   </span>
                   <span className="token-info">
                     {snap.bufferTokensBefore} &rarr;{" "}

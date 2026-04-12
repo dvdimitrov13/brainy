@@ -198,7 +198,7 @@ interface TurnResult {
   response: string;
   conversationBuffer: string;
   memoryContext: string;
-  stats: { notepadTokens: number; exchangeCount: number; sectionCount: number };
+  stats: { notepadTokens: number; exchangeCount: number; noteCount: number };
   recallScore?: { matched: string[]; missed: string[]; score: number };
 }
 
@@ -242,7 +242,7 @@ async function runTest() {
       stats,
     };
 
-    console.log(`  Turn ${turnNum} [${phase}] (${elapsed}s) — Notepad: ${stats.sectionCount} sections, ${stats.notepadTokens} tokens`);
+    console.log(`  Turn ${turnNum} [${phase}] (${elapsed}s) — Notepad: ${stats.noteCount} sections, ${stats.notepadTokens} tokens`);
     return turnResult;
   }
 
@@ -362,7 +362,7 @@ async function runTest() {
   // Notepad final state
   const finalStats = notepadMemory.getStats();
   console.log("\nFinal Notepad:");
-  console.log(`  Sections:    ${finalStats.sectionCount}`);
+  console.log(`  Sections:    ${finalStats.noteCount}`);
   console.log(`  Tokens:      ${finalStats.notepadTokens}`);
   console.log(`  Exchanges:   ${finalStats.exchangeCount}`);
 

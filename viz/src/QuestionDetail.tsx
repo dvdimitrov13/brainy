@@ -159,7 +159,7 @@ export default function QuestionDetail({ result, onBack }: Props) {
             Retrieval: {(result.retrievalTimeMs / 1000).toFixed(1)}s
           </span>
           <span>
-            Notepad: {result.stats.sectionCount}s / {result.stats.notepadTokens}t /{" "}
+            Notes: {result.stats.noteCount} / {result.stats.notepadTokens}t /{" "}
             {result.stats.exchangeCount}ex
           </span>
           <span>Turns: {result.turns.length}</span>
@@ -268,7 +268,7 @@ export default function QuestionDetail({ result, onBack }: Props) {
                       </span>
                     )}
                     <span className="kg-info">
-                      {turn.notepadStats.sectionCount}s / {turn.notepadStats.notepadTokens}t
+                      {turn.notepadStats.noteCount}s / {turn.notepadStats.notepadTokens}t
                     </span>
                     <span className="token-info">
                       {turn.bufferTokensBefore} &rarr;{" "}

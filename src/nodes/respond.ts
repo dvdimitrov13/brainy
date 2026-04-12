@@ -1,16 +1,12 @@
 /**
  * respond.ts — LangGraph node that generates the AI response.
  *
- * The agent has four tools for interacting with its notepad memory:
+ * The agent has four tools for its flat notepad memory:
  *
- *   1. write_notes — add new notes to the notepad (with citations)
- *   2. edit_notes — update an existing section (must read it first)
- *   3. read_notes — read a section's content (or TOC if no section)
- *   4. recall_exchange — fetch raw exchange text from a citation
- *
- * The system prompt always includes the rolling summary + notepad TOC.
- * When mustWriteNotes is set (memory pressure), the agent is forced
- * to call write_notes before responding to the user.
+ *   1. write_notes — add flat, self-contained note entries with dates + citations
+ *   2. edit_notes — update a note by index (must read it first)
+ *   3. read_notes — get all notes, or search by keyword
+ *   4. recall_exchange — fetch raw exchange from a citation
  *
  * Graph position: START → [respond] → memorize → END
  */
@@ -22,10 +18,9 @@ import {
   ToolMessage,
 } from "@langchain/core/messages";
 import type { BrainyState } from "../state.ts";
-import type { NoteOperation } from "../memory/notepad.ts";
+import type { NoteEntry } from "../memory/notepad-ops.ts";
 import { llm } from "../llm.ts";
 import { notepadMemory } from "../singletons.ts";
-import { extractJsonFromResponse } from "../utils.ts";
 
 // ══════════════════════════════════════════════
 // TOOL DEFINITIONS
@@ -36,12 +31,10 @@ const WRITE_NOTES_TOOL = {
   function: {
     name: "write_notes",
     description:
-      "Add new notes to your notepad. Organize hierarchically by topic (e.g., Equipment/Helmet, Trips/June Mountain). " +
-      "Cite source exchanges with [exchange:ID]. " +
-      "Keep notes to top-level facts only (1-3 lines each) — for details, the raw exchange can be recalled later. " +
-      "Include dates/times when available. " +
-      "Before adding, check TOC for existing sections — update via edit_notes instead of duplicating. " +
-      "Do NOT note generic advice you gave — only note facts about the user: decisions, purchases, goals, preferences, events, dates.",
+      "Add notes to your notepad. Each note is a flat, self-contained entry with a date, content, and citation. " +
+      "Write one note per distinct fact. Each note should include enough context to be findable from any angle. " +
+      'Example: "Viewed Cedar Creek property — out of budget, rejected" is findable for "properties viewed", "budget", or "Cedar Creek". ' +
+      "Include dates. Only note facts about the user — not generic advice you gave. Keep each note to 1-2 lines.",
     parameters: {
       type: "object" as const,
       properties: {
@@ -50,25 +43,25 @@ const WRITE_NOTES_TOOL = {
           items: {
             type: "object" as const,
             properties: {
-              sectionPath: {
+              date: {
                 type: "string" as const,
                 description:
-                  'Hierarchical path: "Topic/Subtopic". Use "/" for nesting. Keep hierarchy consistent.',
+                  "When this fact occurred (from session date or context). E.g., '2023/04/10'",
               },
               content: {
                 type: "string" as const,
                 description:
-                  "Dense, factual note (1-3 lines). Include dates. Cite: [exchange:sess0-turn1]",
+                  "Self-contained factual note (1-2 lines). Include enough context to be findable from multiple angles.",
               },
-              afterSection: {
-                type: "string" as const,
+              citations: {
+                type: "array" as const,
+                items: { type: "string" as const },
                 description:
-                  "Optional: place this note after the named section.",
+                  'Source exchange IDs. E.g., ["sess0-turn3"]',
               },
             },
-            required: ["sectionPath", "content"],
+            required: ["date", "content", "citations"],
           },
-          description: "Array of notes to add to the notepad.",
         },
       },
       required: ["notes"],
@@ -81,22 +74,21 @@ const EDIT_NOTES_TOOL = {
   function: {
     name: "edit_notes",
     description:
-      "Update an existing section in the notepad. " +
-      "You MUST read the section first with read_notes before editing it. " +
-      "Use when information needs to be corrected, updated, or expanded.",
+      "Update an existing note by its number. You MUST read notes first (via read_notes) before editing. " +
+      "Use when information needs correcting or updating.",
     parameters: {
       type: "object" as const,
       properties: {
-        section: {
-          type: "string" as const,
-          description: "The section heading to edit.",
+        note_number: {
+          type: "number" as const,
+          description: "The note number to edit (from the note list).",
         },
         content: {
           type: "string" as const,
-          description: "The new content for this section (replaces existing).",
+          description: "The updated content for this note.",
         },
       },
-      required: ["section", "content"],
+      required: ["note_number", "content"],
     },
   },
 };
@@ -106,16 +98,15 @@ const READ_NOTES_TOOL = {
   function: {
     name: "read_notes",
     description:
-      "Read a section from the notepad. Returns only that section's content, " +
-      "not its subsections. If no section specified, returns the table of contents. " +
-      "Reading a section enables editing it with edit_notes.",
+      "Read your notepad. If a search query is provided, returns only matching notes. " +
+      "If no query, returns all notes. For counting/listing questions, search broadly or read all notes.",
     parameters: {
       type: "object" as const,
       properties: {
-        section: {
+        query: {
           type: "string" as const,
           description:
-            "The section heading to read. Omit to get the table of contents.",
+            "Optional keyword search. Returns notes containing any of these words. Omit to read all notes.",
         },
       },
       required: [],
@@ -129,14 +120,13 @@ const RECALL_EXCHANGE_TOOL = {
     name: "recall_exchange",
     description:
       "Fetch the original raw conversation exchange from a notepad citation. " +
-      "Use when a note's [exchange:ID] reference doesn't have enough detail.",
+      "Use when a note's [exchange:ID] doesn't have enough detail.",
     parameters: {
       type: "object" as const,
       properties: {
         id: {
           type: "string" as const,
-          description:
-            'The exchange ID from a citation, e.g., "sess0-turn3".',
+          description: 'The exchange ID, e.g., "sess0-turn3".',
         },
       },
       required: ["id"],
@@ -155,13 +145,9 @@ const TOOLS = [
 // RESPOND NODE
 // ══════════════════════════════════════════════
 
-/**
- * Generate an AI response with access to notepad tools.
- */
 export async function respondNode(
   state: typeof BrainyState.State
 ): Promise<Partial<typeof BrainyState.State>> {
-  // ── Build system prompt ──
   const parts: string[] = [];
 
   const rollingSummary = notepadMemory.getRollingSummary();
@@ -173,43 +159,41 @@ export async function respondNode(
     parts.push(`Recent conversation:\n${state.conversationBuffer}`);
   }
 
-  const toc = notepadMemory.getTOC();
-  parts.push(`Your notepad (table of contents):\n${toc}`);
+  const noteIndex = notepadMemory.getIndex();
+  parts.push(`Your notepad index:\n${noteIndex}`);
 
   const contextBlock = parts.join("\n\n");
 
-  // Build forced instruction if memory pressure requires note-writing
   const pressureInstruction = state.mustWriteNotes
     ? `\n\n**IMPORTANT: Your memory buffer is full. You MUST call write_notes NOW to process the pending exchanges into notes before responding to the user.
 
 Note-taking rules:
-- Only note TOP-LEVEL FACTS: user decisions, purchases, goals, preferences, events, dates, numbers
+- Write one note per distinct fact — self-contained with enough context to be findable from any angle
+- Include the date from the session header
+- Only note facts about the user: decisions, purchases, goals, events, dates, numbers, preferences
 - Do NOT note generic advice you gave — you can regenerate that anytime
-- Keep each note to 1-3 lines — cite [exchange:ID] so you can recall details later
-- Include dates/times from the session headers
-- Check the TOC first — if a relevant section exists, use edit_notes to update it instead of creating duplicates
-- Organize hierarchically: use consistent top-level categories with subtopics
+- Keep each note to 1-2 lines — cite [exchange:ID] for detail recall later
+- Check existing notes first (use read_notes) to avoid duplicating information
 
 Pending exchanges:
 ${state.pendingExchanges.map((e) => `[exchange:${e.id}]\n${e.text}`).join("\n\n")}
 
-Process these into organized notes, then respond to the user.**`
+Process these into notes, then respond to the user.**`
     : "";
 
   const systemPrompt = `You are a helpful, friendly assistant with a notepad for long-term memory.
 
 You have four tools:
-- **write_notes** — add new notes to your notepad, organized by topic with citations
-- **edit_notes** — update an existing section (must read it first)
-- **read_notes** — read a section's content, or get the table of contents
-- **recall_exchange** — fetch the original conversation from a citation [exchange:ID]
+- **write_notes** — add new notes (one per fact, self-contained, with date and citation)
+- **edit_notes** — update a note by number (must read it first)
+- **read_notes** — read all notes or search by keyword
+- **recall_exchange** — fetch raw conversation from a citation [exchange:ID]
 
 How to use:
-- When the user shares important information, write notes to remember it
-- For complex recall questions, read relevant notepad sections, then use recall_exchange if you need more detail
-- For counting/listing questions, read multiple sections and search thoroughly
-- Keep notes dense and factual with citations
-- For casual conversation, just respond directly
+- For recall questions, use read_notes to search your notepad, then recall_exchange for details
+- For counting/listing questions, read all notes or search broadly
+- Write notes when the user shares important facts (decisions, purchases, dates, goals, preferences)
+- Each note should be self-contained — findable from multiple angles
 
 Do NOT mention your notepad or tools. Just respond naturally.${pressureInstruction}
 
@@ -217,13 +201,12 @@ Do NOT mention your notepad or tools. Just respond naturally.${pressureInstructi
 ${contextBlock}
 --- End Memory ---`;
 
-  // ── Tool-calling loop ──
   const messages: (SystemMessage | HumanMessage | AIMessage | ToolMessage)[] = [
     new SystemMessage(systemPrompt),
     new HumanMessage(state.userMessage),
   ];
 
-  const maxToolCalls = 8; // Higher limit to allow write + read + recall chains
+  const maxToolCalls = 8;
   let notesWritten = false;
 
   for (let i = 0; i < maxToolCalls; i++) {
@@ -232,7 +215,6 @@ ${contextBlock}
     const toolCalls = response.tool_calls;
 
     if (!toolCalls || toolCalls.length === 0) {
-      // Final response
       const aiResponse =
         typeof response.content === "string"
           ? response.content
@@ -241,11 +223,9 @@ ${contextBlock}
               .map((block) => block.text ?? "")
               .join("");
 
-      // If we wrote notes during this cycle, clear pressure
       const updates: Partial<typeof BrainyState.State> = { aiResponse };
 
       if (notesWritten && state.mustWriteNotes) {
-        // Generate rolling summary and compress buffer
         await notepadMemory.updateRollingSummary(state.conversationBuffer);
         notepadMemory.resetReadTracking();
 
@@ -258,7 +238,6 @@ ${contextBlock}
       return updates;
     }
 
-    // Execute tool calls
     messages.push(response);
 
     for (const toolCall of toolCalls) {
@@ -267,54 +246,45 @@ ${contextBlock}
       switch (toolCall.name) {
         case "write_notes": {
           const args = toolCall.args as {
-            notes: {
-              sectionPath: string;
-              content: string;
-              afterSection?: string;
-            }[];
+            notes: { date: string; content: string; citations: string[] }[];
           };
 
-          const operations: NoteOperation[] = args.notes.map((n) => ({
-            sectionPath: n.sectionPath,
+          const entries: NoteEntry[] = args.notes.map((n) => ({
+            date: n.date,
             content: n.content,
-            afterSection: n.afterSection,
+            citations: n.citations,
           }));
 
-          notepadMemory.writeNotes(operations);
+          notepadMemory.writeNotes(entries);
           notesWritten = true;
 
-          result = `Added ${operations.length} note(s) to the notepad. Updated TOC:\n${notepadMemory.getTOC()}`;
+          result = `Added ${entries.length} note(s). Notepad now has ${notepadMemory.getStats().noteCount} notes.`;
           break;
         }
 
         case "edit_notes": {
           const args = toolCall.args as {
-            section: string;
+            note_number: number;
             content: string;
           };
 
-          const editResult = notepadMemory.editSection(
-            args.section,
+          const editResult = notepadMemory.editNote(
+            args.note_number,
             args.content
           );
-
           result = editResult.ok
-            ? `Updated section "${args.section}".`
+            ? `Updated note #${args.note_number}.`
             : editResult.error!;
           break;
         }
 
         case "read_notes": {
-          const args = toolCall.args as { section?: string };
+          const args = toolCall.args as { query?: string };
 
-          if (!args.section) {
-            result = `Table of Contents:\n${notepadMemory.getTOC()}`;
+          if (args.query) {
+            result = notepadMemory.search(args.query);
           } else {
-            const content = notepadMemory.readSection(args.section);
-            result =
-              content !== null
-                ? content || "(section exists but has no direct content)"
-                : `Section "${args.section}" not found. Available sections:\n${notepadMemory.getTOC()}`;
+            result = notepadMemory.getAllNotes();
           }
           break;
         }
@@ -322,8 +292,7 @@ ${contextBlock}
         case "recall_exchange": {
           const args = toolCall.args as { id: string };
           const exchange = notepadMemory.getExchange(args.id);
-          result =
-            exchange ?? `Exchange "${args.id}" not found.`;
+          result = exchange ?? `Exchange "${args.id}" not found.`;
           break;
         }
 
@@ -340,7 +309,6 @@ ${contextBlock}
     }
   }
 
-  // Exhausted tool calls
   return {
     aiResponse:
       "I'm having trouble organizing my thoughts. Could you rephrase?",
