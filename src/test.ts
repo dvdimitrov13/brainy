@@ -19,7 +19,7 @@
  */
 
 import { buildGraph } from "./graph.ts";
-import { notepadMemory } from "./singletons.ts";
+import { hipporag } from "./singletons.ts";
 
 // ══════════════════════════════════════════════
 // TEST DATA — Simulated "documents" the user shares
@@ -198,7 +198,7 @@ interface TurnResult {
   response: string;
   conversationBuffer: string;
   memoryContext: string;
-  stats: { notepadTokens: number; exchangeCount: number; noteCount: number };
+  stats: { passages: number; entities: number; facts: number; graphNodes: number };
   recallScore?: { matched: string[]; missed: string[]; score: number };
 }
 
@@ -230,7 +230,7 @@ async function runTest() {
     };
 
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-    const stats = notepadMemory.getStats();
+    const stats = hipporag.getStats();
 
     const turnResult: TurnResult = {
       turn: turnNum,
@@ -242,7 +242,7 @@ async function runTest() {
       stats,
     };
 
-    console.log(`  Turn ${turnNum} [${phase}] (${elapsed}s) — Notepad: ${stats.noteCount} sections, ${stats.notepadTokens} tokens`);
+    console.log(`  Turn ${turnNum} [${phase}] (${elapsed}s) — KG: ${stats.entities}e, ${stats.facts}f, ${stats.passages}p`);
     return turnResult;
   }
 
@@ -360,11 +360,12 @@ async function runTest() {
   }
 
   // Notepad final state
-  const finalStats = notepadMemory.getStats();
-  console.log("\nFinal Notepad:");
-  console.log(`  Sections:    ${finalStats.noteCount}`);
-  console.log(`  Tokens:      ${finalStats.notepadTokens}`);
-  console.log(`  Exchanges:   ${finalStats.exchangeCount}`);
+  const finalStats = hipporag.getStats();
+  console.log("\nFinal Knowledge Graph:");
+  console.log(`  Passages:    ${finalStats.passages}`);
+  console.log(`  Entities:    ${finalStats.entities}`);
+  console.log(`  Facts:       ${finalStats.facts}`);
+  console.log(`  Graph nodes: ${finalStats.graphNodes}`);
 
   // Conversation buffer final state
   const buf = (state.conversationBuffer as string) || "";

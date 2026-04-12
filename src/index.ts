@@ -30,7 +30,7 @@
 
 import * as readline from "node:readline";
 import { buildGraph } from "./graph.ts";
-import { notepadMemory } from "./singletons.ts";
+import { hipporag } from "./singletons.ts";
 
 async function main() {
   // Build the LangGraph pipeline
@@ -87,16 +87,15 @@ async function main() {
 
       // Handle stats command (for debugging)
       if (trimmed.toLowerCase() === "stats") {
-        const stats = notepadMemory.getStats();
+        const stats = hipporag.getStats();
         console.log("\n--- Memory Stats ---");
-        console.log(`Notes:            ${stats.noteCount}`);
-        console.log(`Notepad tokens:   ${stats.notepadTokens}`);
-        console.log(`Exchanges stored: ${stats.exchangeCount}`);
-        console.log(`Turn count:       ${(currentState.turnCount as number) ?? 0}`);
+        console.log(`Passages:  ${stats.passages}`);
+        console.log(`Entities:  ${stats.entities}`);
+        console.log(`Facts:     ${stats.facts}`);
+        console.log(`Turn count: ${(currentState.turnCount as number) ?? 0}`);
         const buf = (currentState.conversationBuffer as string) || "";
         const bufTokens = Math.ceil(buf.length / 4);
-        console.log(`Buffer tokens:    ~${bufTokens} / 1024`);
-        console.log(`Index:\n${notepadMemory.getIndex()}`);
+        console.log(`Buffer:    ~${bufTokens} / 1024 tokens`);
         console.log("---\n");
         askQuestion();
         return;

@@ -27,11 +27,11 @@
  *   - `...spread` operator copies object/array elements (like {**dict} or [*list] in Python).
  */
 
-import type { Triple, Passage, HippoRAGConfig } from "./types.ts";
+import type { Triple, Passage, PassageTags, HippoRAGConfig } from "./types.ts";
 import { DEFAULT_CONFIG } from "./types.ts";
 import { KnowledgeGraph } from "./knowledge-graph.ts";
 import { EmbeddingStore } from "./embedding-store.ts";
-import { extractTriples, tripleToString } from "./openie.ts";
+import { processExchange, tripleToString } from "./openie.ts";
 import { filterTriples } from "./recognition-memory.ts";
 import { embedTexts, embedQuery } from "../llm.ts";
 import {
@@ -76,6 +76,10 @@ export class HippoRAG {
    *  Used to look up triple content during retrieval. */
   private factIdToTriple: Map<string, Triple> = new Map();
 
+  /** Map from fact store ID → passage ID that contains it.
+   *  Used to look up passage tags for tag-based filtering. */
+  private factIdToPassageId: Map<string, string> = new Map();
+
   /** All indexed passages, keyed by passage ID */
   private passages: Map<string, Passage> = new Map();
 
@@ -119,8 +123,9 @@ export class HippoRAG {
    * @returns the created Passage object
    */
   async index(text: string): Promise<Passage> {
-    // ── Step 1: Extract triples via LLM ──
-    const { triples, salience } = await extractTriples(text);
+    // ── Step 1: Process exchange — summarize + extract triples + tag ──
+    // Single LLM call produces everything we need.
+    const { summary, triples, tags, salience } = await processExchange(text);
 
     // ── Step 2: Create passage ID ──
     const passageId = computeHashId(
@@ -162,6 +167,7 @@ export class HippoRAG {
       ) {
         newFactStrings.push({ id: factId, text: factStr });
         this.factIdToTriple.set(factId, triple);
+        this.factIdToPassageId.set(factId, passageId);
       }
     }
 
@@ -169,7 +175,7 @@ export class HippoRAG {
     // Combine all texts into one API call to minimize rate limit usage.
     // We'll split the results back out by index position.
     const allTextsToEmbed: string[] = [
-      text, // index 0 = passage
+      summary, // index 0 = passage (embed the summary, not raw text)
       ...newEntityNames.map((e) => e.name), // indices 1..N = entities
       ...newFactStrings.map((f) => f.text), // indices N+1..M = facts
     ];
@@ -187,16 +193,17 @@ export class HippoRAG {
     // ── Step 5: Create and store the Passage object ──
     const passage: Passage = {
       id: passageId,
-      text,
+      text: summary, // Store the dense summary, not raw text
       embedding: passageEmbedding,
       triples,
+      tags,
       timestamp: Date.now(),
       salience,
       accessCount: 0,
       lastAccessed: 0,
     };
     this.passages.set(passageId, passage);
-    this.chunkStore.insert(passageId, text, passage.embedding);
+    this.chunkStore.insert(passageId, summary, passage.embedding);
 
     // ── Step 6: Add passage node to graph ──
     this.graph.addNode(passageId, "passage");
@@ -251,7 +258,39 @@ export class HippoRAG {
   }
 
   // ══════════════════════════════════════════════
-  // RETRIEVAL PIPELINE (two tools)
+  // TAG FILTERING
+  // ══════════════════════════════════════════════
+
+  /**
+   * Check if a passage's tags match the given filter.
+   * A passage matches if it has ANY of the requested types AND ANY of the requested topics.
+   * If a filter dimension is empty/undefined, it matches all.
+   */
+  private passageMatchesTags(
+    passageId: string,
+    typeFilter?: string[],
+    topicFilter?: string[]
+  ): boolean {
+    const passage = this.passages.get(passageId);
+    if (!passage) return false;
+
+    const typeMatch =
+      !typeFilter ||
+      typeFilter.length === 0 ||
+      typeFilter.some((t) => passage.tags.type.includes(t as any));
+
+    const topicMatch =
+      !topicFilter ||
+      topicFilter.length === 0 ||
+      topicFilter.some((t) =>
+        passage.tags.topics.some((pt) => pt.includes(t.toLowerCase()))
+      );
+
+    return typeMatch && topicMatch;
+  }
+
+  // ══════════════════════════════════════════════
+  // RETRIEVAL PIPELINE
   //
   // recognize() — agent calls this to surface associations
   //   Embed query → dense triple match → LLM filter (recognition memory)
@@ -276,19 +315,28 @@ export class HippoRAG {
    * @param query — the user's message
    * @returns filtered triples that passed recognition memory
    */
-  async recognize(query: string): Promise<Triple[]> {
+  async recognize(
+    query: string,
+    typeFilter?: string[],
+    topicFilter?: string[]
+  ): Promise<Triple[]> {
     if (this.passages.size === 0) return [];
 
-    // ── Step 1: Embed the query ──
     const queryEmbedding = await embedQuery(query);
 
-    // ── Step 2: Get top-K candidate triples by cosine similarity ──
-    // Cast a wide net (top 25) — triples are small so this is cheap.
-    // The LLM recognition memory filter is the real quality gate.
+    // Get all fact IDs, optionally filtered by tags
     const factIds = this.factStore.getAllIds();
     const scored: { factId: string; sim: number }[] = [];
 
     for (const factId of factIds) {
+      // Tag filter: skip facts from passages that don't match
+      if (typeFilter?.length || topicFilter?.length) {
+        const passageId = this.factIdToPassageId.get(factId);
+        if (passageId && !this.passageMatchesTags(passageId, typeFilter, topicFilter)) {
+          continue;
+        }
+      }
+
       const factEmb = this.factStore.getEmbedding(factId);
       if (!factEmb) continue;
       scored.push({ factId, sim: cosineSimilarity(queryEmbedding, factEmb) });
@@ -322,7 +370,9 @@ export class HippoRAG {
    */
   async recall(
     query: string,
-    triples: Triple[]
+    triples: Triple[],
+    typeFilter?: string[],
+    topicFilter?: string[]
   ): Promise<Passage[]> {
     if (this.passages.size === 0) return [];
 
@@ -439,9 +489,16 @@ export class HippoRAG {
     const maxResults = this.config.retrievalMaxResults;
 
     const results: Passage[] = [];
+    const hasTags = (typeFilter?.length ?? 0) > 0 || (topicFilter?.length ?? 0) > 0;
+
     for (const { id, score } of rankedPassages) {
       if (results.length >= maxResults) break;
-      if (results.length > 0 && score < threshold) break; // always keep at least 1
+      if (results.length > 0 && score < threshold) break;
+
+      // Apply tag filter to PPR results
+      if (hasTags && !this.passageMatchesTags(id, typeFilter, topicFilter)) {
+        continue;
+      }
 
       const passage = this.passages.get(id);
       if (passage) {
@@ -460,9 +517,13 @@ export class HippoRAG {
    * Full pipeline: recognize → recall in one call.
    * Used by both the agent tool and the eval.
    */
-  async retrieve(query: string): Promise<Passage[]> {
-    const triples = await this.recognize(query);
-    return this.recall(query, triples);
+  async retrieve(
+    query: string,
+    typeFilter?: string[],
+    topicFilter?: string[]
+  ): Promise<Passage[]> {
+    const triples = await this.recognize(query, typeFilter, topicFilter);
+    return this.recall(query, triples, typeFilter, topicFilter);
   }
 
   // ══════════════════════════════════════════════

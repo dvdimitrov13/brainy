@@ -65,26 +65,26 @@ function BufferChart({ turns }: { turns: TurnSnapshot[] }) {
   );
 }
 
-/** Notepad growth chart */
-function NotepadChart({ turns }: { turns: TurnSnapshot[] }) {
+/** KG growth chart */
+function KGChart({ turns }: { turns: TurnSnapshot[] }) {
   if (turns.length === 0) return null;
 
   const maxVal = Math.max(
     1,
-    ...turns.map((t) => t.notepadStats.notepadTokens)
+    ...turns.map((t) => Math.max(t.kgStats.entities, t.kgStats.facts))
   );
   const chartHeight = 100;
 
   return (
     <div className="buffer-chart">
-      <h4>Notepad Growth</h4>
+      <h4>Knowledge Graph Growth</h4>
       <svg
         width="100%"
         height={chartHeight + 20}
         viewBox={`0 0 ${turns.length * 20} ${chartHeight + 20}`}
         preserveAspectRatio="none"
       >
-        {/* Notepad tokens line */}
+        {/* Entities line */}
         <polyline
           fill="none"
           stroke="var(--accent)"
@@ -92,7 +92,19 @@ function NotepadChart({ turns }: { turns: TurnSnapshot[] }) {
           points={turns
             .map(
               (t, i) =>
-                `${i * 20 + 10},${chartHeight - (t.notepadStats.notepadTokens / maxVal) * chartHeight}`
+                `${i * 20 + 10},${chartHeight - (t.kgStats.entities / maxVal) * chartHeight}`
+            )
+            .join(" ")}
+        />
+        {/* Facts line */}
+        <polyline
+          fill="none"
+          stroke="var(--warn)"
+          strokeWidth="2"
+          points={turns
+            .map(
+              (t, i) =>
+                `${i * 20 + 10},${chartHeight - (t.kgStats.facts / maxVal) * chartHeight}`
             )
             .join(" ")}
         />
@@ -115,19 +127,13 @@ function NotepadChart({ turns }: { turns: TurnSnapshot[] }) {
       </svg>
       <div className="chart-legend">
         <span className="legend-normal">Entities</span>
+        <span style={{ color: "var(--warn)" }}>
+          <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: 2, background: "var(--warn)", marginRight: 4, verticalAlign: "middle" }} />
+          Facts
+        </span>
         <span style={{ color: "var(--summarize)" }}>
-          <span
-            style={{
-              display: "inline-block",
-              width: 8,
-              height: 8,
-              borderRadius: 2,
-              background: "var(--summarize)",
-              marginRight: 4,
-              verticalAlign: "middle",
-            }}
-          />
-          Note-writing
+          <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: 2, background: "var(--summarize)", marginRight: 4, verticalAlign: "middle" }} />
+          Summarization
         </span>
       </div>
     </div>
@@ -159,8 +165,8 @@ export default function QuestionDetail({ result, onBack }: Props) {
             Retrieval: {(result.retrievalTimeMs / 1000).toFixed(1)}s
           </span>
           <span>
-            Notes: {result.stats.noteCount} / {result.stats.notepadTokens}t /{" "}
-            {result.stats.exchangeCount}ex
+            KG: {result.stats.entities}e / {result.stats.facts}f /{" "}
+            {result.stats.passages}p
           </span>
           <span>Turns: {result.turns.length}</span>
         </div>
@@ -213,12 +219,12 @@ export default function QuestionDetail({ result, onBack }: Props) {
         </div>
       ) : null}
 
-      {/* Always show notepad content */}
+      {/* Retrieved context from tool calls */}
       <div className="detail-cards">
         <div className="detail-card full-width">
-          <h3>Notepad Content</h3>
+          <h3>Retrieved Context</h3>
           <pre className="notepad-content">
-            {result.notepadContent || "(empty notepad)"}
+            {result.retrievedContext || "(no passages retrieved)"}
           </pre>
         </div>
       </div>
@@ -242,7 +248,7 @@ export default function QuestionDetail({ result, onBack }: Props) {
           </h3>
 
           <BufferChart turns={result.turns} />
-          <NotepadChart turns={result.turns} />
+          <KGChart turns={result.turns} />
 
           <div className="turn-list">
             {result.turns.map((turn) => {
@@ -268,7 +274,7 @@ export default function QuestionDetail({ result, onBack }: Props) {
                       </span>
                     )}
                     <span className="kg-info">
-                      {turn.notepadStats.noteCount}s / {turn.notepadStats.notepadTokens}t
+                      {turn.kgStats.entities}e / {turn.kgStats.facts}f
                     </span>
                     <span className="token-info">
                       {turn.bufferTokensBefore} &rarr;{" "}

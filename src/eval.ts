@@ -1,9 +1,9 @@
 /**
  * eval.ts — LongMemEval benchmark evaluation logic.
  *
- * Exports core evaluation functions that can be used by both the CLI
- * and the API server. Uses the same notepad-based memory system and
- * tool-calling flow as the live agent.
+ * Uses HippoRAG with tag-based filtering. The agent decides when to
+ * call remember(query, type?, topics?) via the same tool-calling loop
+ * as the live agent.
  *
  * Usage (CLI):
  *   bun run src/eval.ts --count 2
@@ -11,9 +11,8 @@
  *   bun run src/eval.ts --type multi-session --count 5
  */
 
-import { NotepadMemory } from "./memory/notepad.ts";
-import type { NoteEntry } from "./memory/notepad-ops.ts";
-import { llm } from "./llm.ts";
+import { HippoRAG } from "./hipporag/index.ts";
+import { llm, llmFast } from "./llm.ts";
 import {
   HumanMessage,
   SystemMessage,
@@ -52,7 +51,7 @@ export interface TurnSnapshot {
   bufferTokensAfter: number;
   summarized: boolean;
   summaryText?: string;
-  notepadStats: { notepadTokens: number; exchangeCount: number; noteCount: number };
+  kgStats: { passages: number; entities: number; facts: number };
 }
 
 export interface ToolCallTrace {
@@ -76,8 +75,7 @@ export interface EvalResult {
   correct: boolean;
   retrievedContext: string;
   conversationBuffer: string;
-  notepadContent: string;
-  stats: { notepadTokens: number; exchangeCount: number; noteCount: number };
+  stats: { passages: number; entities: number; facts: number };
   indexingTimeMs: number;
   retrievalTimeMs: number;
   turns: TurnSnapshot[];
@@ -113,22 +111,15 @@ async function judgeAnswer(
 ): Promise<boolean> {
   const response = await llm.invoke([
     new SystemMessage(
-      `You are an evaluation judge. Given a question, an expected answer, and a generated answer, determine if the generated answer is correct.
+      `You are an evaluation judge. Determine if the generated answer is correct.
 
-The generated answer is CORRECT if:
-- It contains the key information from the expected answer (semantic match, not exact string)
-- It may contain additional details — that's fine
-- It may use different wording — what matters is the factual content
+CORRECT if it contains the key information from the expected answer (semantic match).
+INCORRECT if it misses key facts, contradicts, or says "I don't know".
 
-The generated answer is INCORRECT if:
-- It misses the key facts from the expected answer
-- It contradicts the expected answer
-- It says "I don't know" or similar when an answer exists
-
-Respond with ONLY "CORRECT" or "INCORRECT", nothing else.`
+Respond with ONLY "CORRECT" or "INCORRECT".`
     ),
     new HumanMessage(
-      `Question: ${question}\n\nExpected answer: ${expectedAnswer}\n\nGenerated answer: ${generatedAnswer}\n\nVerdict:`
+      `Question: ${question}\n\nExpected: ${expectedAnswer}\n\nGenerated: ${generatedAnswer}\n\nVerdict:`
     ),
   ]);
 
@@ -136,124 +127,68 @@ Respond with ONLY "CORRECT" or "INCORRECT", nothing else.`
     typeof response.content === "string"
       ? response.content.trim().toUpperCase()
       : "";
-
   return verdict.includes("CORRECT") && !verdict.includes("INCORRECT");
 }
 
 // ══════════════════════════════════════════════
-// TOOL DEFINITIONS (same as respond.ts)
+// ROLLING SUMMARY
 // ══════════════════════════════════════════════
 
-function getEvalTools() {
-  return [
+async function generateRollingSummary(
+  prev: string,
+  buffer: string
+): Promise<string> {
+  const response = await llmFast.invoke([
     {
-      type: "function" as const,
-      function: {
-        name: "write_notes",
-        description:
-          "Add notes to your notepad. One note per fact, self-contained with date and citation. " +
-          "Only note user facts — not generic advice. Keep 1-2 lines each.",
-        parameters: {
-          type: "object" as const,
-          properties: {
-            notes: {
-              type: "array" as const,
-              items: {
-                type: "object" as const,
-                properties: {
-                  date: { type: "string" as const, description: "When this fact occurred" },
-                  content: { type: "string" as const, description: "Self-contained factual note (1-2 lines)" },
-                  citations: { type: "array" as const, items: { type: "string" as const }, description: "Source exchange IDs" },
-                },
-                required: ["date", "content", "citations"],
-              },
-            },
-          },
-          required: ["notes"],
-        },
-      },
+      role: "system" as const,
+      content: `Compress conversation context into a rolling summary (2-4 sentences).
+Previous: ${prev || "(none)"}
+Recent: ${buffer}
+Respond with ONLY the summary.`,
     },
-    {
-      type: "function" as const,
-      function: {
-        name: "edit_notes",
-        description: "Update an existing note by number. Must read it first with read_notes.",
-        parameters: {
-          type: "object" as const,
-          properties: {
-            note_number: { type: "number" as const, description: "Note number to edit" },
-            content: { type: "string" as const, description: "Updated content" },
-          },
-          required: ["note_number", "content"],
-        },
-      },
-    },
-    {
-      type: "function" as const,
-      function: {
-        name: "read_notes",
-        description: "Read notes. Provide a query to search, or omit to read all notes.",
-        parameters: {
-          type: "object" as const,
-          properties: {
-            query: { type: "string" as const, description: "Keyword search. Omit to read all." },
-          },
-          required: [],
-        },
-      },
-    },
-    {
-      type: "function" as const,
-      function: {
-        name: "recall_exchange",
-        description: "Fetch raw conversation from a citation [exchange:ID].",
-        parameters: {
-          type: "object" as const,
-          properties: {
-            id: { type: "string" as const, description: 'Exchange ID, e.g., "sess0-turn3"' },
-          },
-          required: ["id"],
-        },
-      },
-    },
-  ];
+    { role: "user" as const, content: "Generate rolling summary." },
+  ]);
+
+  return typeof response.content === "string"
+    ? response.content.trim()
+    : (response.content as Array<{ type: string; text?: string }>)
+        .filter((b) => b.type === "text")
+        .map((b) => b.text ?? "")
+        .join("")
+        .trim();
 }
 
 // ══════════════════════════════════════════════
-// TOOL EXECUTION
+// REMEMBER TOOL
 // ══════════════════════════════════════════════
 
-function executeToolCall(
-  notepad: NotepadMemory,
-  toolName: string,
-  args: Record<string, unknown>
-): string {
-  switch (toolName) {
-    case "write_notes": {
-      const notes = args.notes as { date: string; content: string; citations: string[] }[];
-      const entries: NoteEntry[] = notes.map((n) => ({
-        date: n.date,
-        content: n.content,
-        citations: n.citations,
-      }));
-      notepad.writeNotes(entries);
-      return `Added ${entries.length} note(s). Notepad now has ${notepad.getStats().noteCount} notes.`;
-    }
-    case "edit_notes": {
-      const result = notepad.editNote(args.note_number as number, args.content as string);
-      return result.ok ? `Updated note #${args.note_number}.` : result.error!;
-    }
-    case "read_notes": {
-      if (args.query) return notepad.search(args.query as string);
-      return notepad.getAllNotes();
-    }
-    case "recall_exchange": {
-      const exchange = notepad.getExchange(args.id as string);
-      return exchange ?? `Exchange "${args.id}" not found.`;
-    }
-    default:
-      return `Unknown tool: ${toolName}`;
-  }
+function getRememberTool() {
+  return {
+    type: "function" as const,
+    function: {
+      name: "remember",
+      description:
+        "Search long-term memory. Optionally filter by type and/or topics. " +
+        "For counting/listing, make multiple calls with different filters.",
+      parameters: {
+        type: "object" as const,
+        properties: {
+          query: { type: "string" as const, description: "Search query" },
+          type: {
+            type: "array" as const,
+            items: { type: "string" as const },
+            description: 'Filter: "event","decision","preference","fact","goal","plan"',
+          },
+          topics: {
+            type: "array" as const,
+            items: { type: "string" as const },
+            description: "Filter: topic keywords like [\"property\",\"kitchen\"]",
+          },
+        },
+        required: ["query"],
+      },
+    },
+  };
 }
 
 // ══════════════════════════════════════════════
@@ -301,15 +236,15 @@ export async function evaluateQuestion(
   item: EvalItem,
   onTurn?: OnTurnCallback
 ): Promise<EvalResult> {
-  const notepad = new NotepadMemory();
+  const hipporag = new HippoRAG();
   let conversationBuffer = "";
-  let pendingExchanges: { id: string; text: string }[] = [];
+  let pendingExchanges: string[] = [];
   const turns: TurnSnapshot[] = [];
   let globalTurnIndex = 0;
 
   const totalTurns = countTurnPairs(item);
   const indexStart = Date.now();
-  const TOOLS = getEvalTools();
+  const TOKEN_THRESHOLD = 1024;
 
   for (let sessIdx = 0; sessIdx < item.haystack_sessions.length; sessIdx++) {
     const session = item.haystack_sessions[sessIdx]!;
@@ -325,75 +260,34 @@ export async function evaluateQuestion(
       exchangeText += `User: ${userTurn.content}`;
       if (assistantTurn) exchangeText += `\nAssistant: ${assistantTurn.content}`;
 
-      const exchangeId = `sess${sessIdx}-turn${Math.floor(t / 2)}`;
-      notepad.storeExchange(exchangeId, exchangeText);
-
       const bufferTokensBefore = estimateTokens(conversationBuffer);
-      conversationBuffer = notepad.append(conversationBuffer, exchangeText);
-      pendingExchanges.push({ id: exchangeId, text: exchangeText });
+
+      conversationBuffer = conversationBuffer
+        ? `${conversationBuffer}\n\n${exchangeText}`
+        : exchangeText;
+      pendingExchanges.push(exchangeText);
 
       const bufferTokensPeak = estimateTokens(conversationBuffer);
 
       let summarized = false;
       let summaryText: string | undefined;
 
-      // Check memory pressure — force note-writing via LLM
-      if (notepad.shouldSummarize(conversationBuffer) && pendingExchanges.length > 0) {
-        // Build a note-writing prompt identical to the forced write_notes flow
-        const toc = notepad.getIndex();
-        const rollingSummary = notepad.getRollingSummary();
+      if (estimateTokens(conversationBuffer) > TOKEN_THRESHOLD && pendingExchanges.length > 0) {
+        await Promise.all(pendingExchanges.map((ex) => hipporag.index(ex)));
 
-        const noteMessages: (SystemMessage | HumanMessage | AIMessage | ToolMessage)[] = [
-          new SystemMessage(
-            `You are a helpful assistant with a notepad for long-term memory.
-
-Your notepad index:
-${toc}
-
-${rollingSummary ? `Conversation summary: ${rollingSummary}` : ""}
-
-**Your memory buffer is full. You MUST call write_notes to process these pending exchanges into notes.**
-
-Note-taking rules:
-- Write one note per distinct fact — self-contained with enough context to be findable from any angle
-- Include the date from the session header
-- Only note facts about the user: decisions, purchases, goals, events, dates, numbers, preferences
-- Do NOT note generic advice you gave — you can regenerate that anytime
-- Keep each note to 1-2 lines — cite [exchange:ID] for detail recall later
-- Check existing notes first (use read_notes) to avoid duplicates
-
-Pending exchanges:
-${pendingExchanges.map((e) => `[exchange:${e.id}]\n${e.text}`).join("\n\n")}
-
-Process these into notes, then respond briefly.`
-          ),
-          new HumanMessage("Process the pending exchanges into notes."),
-        ];
-
-        // Let the LLM write notes (up to 3 tool calls)
-        for (let i = 0; i < 3; i++) {
-          const resp = await llm.invoke(noteMessages, { tools: TOOLS });
-          const tc = resp.tool_calls;
-          if (!tc || tc.length === 0) break;
-
-          noteMessages.push(resp);
-          for (const call of tc) {
-            const result = executeToolCall(notepad, call.name, call.args as Record<string, unknown>);
-            noteMessages.push(new ToolMessage({ tool_call_id: call.id ?? `idx_${i}`, content: result }));
-          }
-        }
-
-        // Generate rolling summary and compress buffer
-        await notepad.updateRollingSummary(conversationBuffer);
-        summaryText = notepad.getRollingSummary();
-        conversationBuffer = "[Summary]\n" + summaryText;
+        const prevSummary = conversationBuffer.startsWith("[Summary]")
+          ? conversationBuffer.slice("[Summary]\n".length).split("\n\n")[0] ?? ""
+          : "";
+        const summary = await generateRollingSummary(prevSummary, conversationBuffer);
+        summaryText = summary;
+        conversationBuffer = `[Summary]\n${summary}`;
         pendingExchanges = [];
-        notepad.resetReadTracking();
         summarized = true;
+        hipporag.forget();
       }
 
       const bufferTokensAfter = estimateTokens(conversationBuffer);
-      const notepadStats = notepad.getStats();
+      const kgStats = hipporag.getStats();
 
       const snapshot: TurnSnapshot = {
         turnIndex: globalTurnIndex++,
@@ -404,95 +298,61 @@ Process these into notes, then respond briefly.`
         bufferTokensAfter,
         summarized,
         summaryText,
-        notepadStats,
+        kgStats: {
+          passages: kgStats.passages,
+          entities: kgStats.entities,
+          facts: kgStats.facts,
+        },
       };
 
       turns.push(snapshot);
       onTurn?.(snapshot, totalTurns);
     }
 
-    // ── Session boundary: flush pending exchanges as notes ──
+    // Session boundary: flush + reset
     if (pendingExchanges.length > 0) {
-      const toc = notepad.getIndex();
-      const rollingSummary = notepad.getRollingSummary();
-
-      const noteMessages: (SystemMessage | HumanMessage | AIMessage | ToolMessage)[] = [
-        new SystemMessage(
-          `You are a helpful assistant with a notepad. Process these exchanges into notes.
-
-Your notepad index:
-${toc}
-
-${rollingSummary ? `Summary: ${rollingSummary}` : ""}
-
-Note-taking rules:
-- Write one note per distinct fact — self-contained, findable from any angle
-- Include the date from the session header
-- Only note user facts: decisions, purchases, goals, events, dates, numbers, preferences
-- Do NOT note generic advice — keep 1-2 lines each with [exchange:ID] citation
-- Check existing notes (use read_notes) to avoid duplicates
-
-Pending exchanges:
-${pendingExchanges.map((e) => `[exchange:${e.id}]\n${e.text}`).join("\n\n")}
-
-Call write_notes to save important information, then respond briefly.`
-        ),
-        new HumanMessage("Process these exchanges into notes."),
-      ];
-
-      for (let i = 0; i < 3; i++) {
-        const resp = await llm.invoke(noteMessages, { tools: TOOLS });
-        const tc = resp.tool_calls;
-        if (!tc || tc.length === 0) break;
-        noteMessages.push(resp);
-        for (const call of tc) {
-          const result = executeToolCall(notepad, call.name, call.args as Record<string, unknown>);
-          noteMessages.push(new ToolMessage({ tool_call_id: call.id ?? `flush_${i}`, content: result }));
-        }
-      }
-
+      await Promise.all(pendingExchanges.map((ex) => hipporag.index(ex)));
       pendingExchanges = [];
     }
-    // Generate rolling summary before resetting buffer
     if (conversationBuffer) {
-      await notepad.updateRollingSummary(conversationBuffer);
+      const prevSummary = conversationBuffer.startsWith("[Summary]")
+        ? conversationBuffer.slice("[Summary]\n".length).split("\n\n")[0] ?? ""
+        : "";
+      await generateRollingSummary(prevSummary, conversationBuffer);
     }
     conversationBuffer = "";
-    notepad.resetReadTracking();
-    notepad.newSession();
+    hipporag.forget();
   }
 
   const indexingTimeMs = Date.now() - indexStart;
 
   // ══════════════════════════════════════════════
-  // ANSWER GENERATION (same tool-calling flow as live agent)
+  // ANSWER GENERATION (agent tool-calling loop)
   // ══════════════════════════════════════════════
 
-  const toc = notepad.getIndex();
-  const rollingSummary = notepad.getRollingSummary();
+  const TOOL = getRememberTool();
 
+  const stats = hipporag.getStats();
   const contextParts: string[] = [];
-  if (rollingSummary) contextParts.push(`Conversation summary: ${rollingSummary}`);
-  if (conversationBuffer) contextParts.push(`Recent conversation:\n${conversationBuffer}`);
-  contextParts.push(`Your notepad index:\n${toc}`);
+  if (conversationBuffer) contextParts.push(`Conversation:\n${conversationBuffer}`);
+  if (stats.passages > 0) {
+    contextParts.push(`Long-term memory: ${stats.passages} passages, ${stats.entities} entities`);
+  }
 
   const messages: (SystemMessage | HumanMessage | AIMessage | ToolMessage)[] = [
     new SystemMessage(
-      `You are a helpful, friendly assistant with a notepad for long-term memory.
+      `You are a helpful assistant with long-term memory.
 
-You have four tools:
-- **write_notes** — add new notes (one per fact, with date and citation)
-- **edit_notes** — update a note by number (must read first)
-- **read_notes** — search by keyword, or read all notes
-- **recall_exchange** — fetch raw conversation from a citation [exchange:ID]
+You have a memory tool: **remember(query, type?, topics?)** — searches past conversations.
 
-For recall questions, use read_notes to search or read all. For counting/listing, read all notes.
+Filters: type (event/decision/preference/fact/goal/plan), topics (keywords).
+For counting/listing, make multiple calls with different filters.
 
-Do NOT mention your notepad or tools. Just respond naturally.
+Do NOT mention your tools. Respond naturally.
 
---- Your Memory ---
+--- Memory ---
 ${contextParts.join("\n\n")}
---- End Memory ---`
+--- End ---`
     ),
     new HumanMessage(item.question),
   ];
@@ -501,8 +361,8 @@ ${contextParts.join("\n\n")}
   const retrievalStart = Date.now();
   let generatedAnswer = "";
 
-  for (let i = 0; i < 8; i++) {
-    const response = await llm.invoke(messages, { tools: TOOLS });
+  for (let i = 0; i < 5; i++) {
+    const response = await llm.invoke(messages, { tools: [TOOL] });
     const toolCalls = response.tool_calls;
 
     if (!toolCalls || toolCalls.length === 0) {
@@ -519,17 +379,44 @@ ${contextParts.join("\n\n")}
     messages.push(response);
 
     for (const toolCall of toolCalls) {
-      const callStart = Date.now();
-      const result = executeToolCall(notepad, toolCall.name, toolCall.args as Record<string, unknown>);
+      if (toolCall.name === "remember") {
+        const args = toolCall.args as {
+          query: string;
+          type?: string[];
+          topics?: string[];
+        };
+        const callStart = Date.now();
 
-      toolCallTraces.push({
-        tool: toolCall.name,
-        query: JSON.stringify(toolCall.args),
-        result,
-        durationMs: Date.now() - callStart,
-      });
+        const passages = await hipporag.retrieve(
+          args.query,
+          args.type,
+          args.topics
+        );
 
-      messages.push(new ToolMessage({ tool_call_id: toolCall.id ?? `ans_${i}`, content: result }));
+        const result =
+          passages.length > 0
+            ? passages
+                .map((p, idx) => {
+                  const tagStr = `[${p.tags.type.join(",")}] [${p.tags.topics.join(",")}]`;
+                  return `[Memory ${idx + 1}] ${tagStr}: ${p.text}`;
+                })
+                .join("\n\n")
+            : "No relevant memories found.";
+
+        toolCallTraces.push({
+          tool: "remember",
+          query: JSON.stringify(args),
+          result,
+          durationMs: Date.now() - callStart,
+        });
+
+        messages.push(
+          new ToolMessage({
+            tool_call_id: toolCall.id ?? `call_${i}`,
+            content: result,
+          })
+        );
+      }
     }
   }
 
@@ -540,7 +427,7 @@ ${contextParts.join("\n\n")}
   }
 
   const correct = await judgeAnswer(item.question, item.answer, generatedAnswer);
-  const stats = notepad.getStats();
+  const finalStats = hipporag.getStats();
 
   return {
     questionId: item.question_id,
@@ -551,8 +438,7 @@ ${contextParts.join("\n\n")}
     correct,
     retrievedContext: toolCallTraces.map((t) => t.result).join("\n\n"),
     conversationBuffer,
-    notepadContent: notepad.getFullContent(),
-    stats,
+    stats: { passages: finalStats.passages, entities: finalStats.entities, facts: finalStats.facts },
     indexingTimeMs,
     retrievalTimeMs,
     turns,
@@ -614,7 +500,7 @@ async function main() {
       const mark = result.correct ? "PASS" : "FAIL";
       const s = result.stats;
       console.log(
-        `${mark} (${s.noteCount}s/${s.notepadTokens}t, idx:${(result.indexingTimeMs / 1000).toFixed(0)}s, ret:${(result.retrievalTimeMs / 1000).toFixed(0)}s)`
+        `${mark} (${s.entities}e/${s.facts}f/${s.passages}p, idx:${(result.indexingTimeMs / 1000).toFixed(0)}s, ret:${(result.retrievalTimeMs / 1000).toFixed(0)}s)`
       );
 
       if (!result.correct) {

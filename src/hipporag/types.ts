@@ -36,15 +36,28 @@ export interface Triple {
  * Each passage corresponds to one conversation exchange (user + assistant).
  * The embedding is computed via Voyage 3.5 and stored alongside the text.
  */
+/** Valid note types for the fixed-vocabulary tag level */
+export type NoteType = "event" | "decision" | "preference" | "fact" | "goal" | "plan";
+
+/** Two-level tag system for metadata filtering */
+export interface PassageTags {
+  /** Fixed vocabulary: what kind of information (event, decision, preference, fact, goal, plan) */
+  type: NoteType[];
+  /** Open vocabulary: what it's about (property, cedar-creek, kitchen, bike, etc.) */
+  topics: string[];
+}
+
 export interface Passage {
   /** Unique content-based ID (e.g. "passage-a1b2c3d4") */
   id: string;
-  /** The raw conversation text */
+  /** Dense summary of the exchange (4:1 compressed) */
   text: string;
   /** Voyage 3.5 embedding vector */
   embedding: number[];
   /** The triples extracted from this passage */
   triples: Triple[];
+  /** Two-level tags for metadata filtering */
+  tags: PassageTags;
   /** Unix timestamp (Date.now()) when the passage was indexed */
   timestamp: number;
   /** LLM-judged importance score, 0-1 (used for semantic forgetting) */
