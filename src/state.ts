@@ -87,10 +87,15 @@ export const BrainyState = Annotation.Root({
   }),
 
   /**
-   * Formatted string of relevant passages retrieved from HippoRAG.
+   * Formatted string of relevant triples from HippoRAG (Phase 1).
+   *
+   * These are lightweight entity associations that surface automatically
+   * every turn. The agent sees these and can decide whether to "recall"
+   * full passages by calling the recall tool (Phase 2).
+   *
    * Rebuilt each turn during the retrieve node — purely transient.
    */
-  retrievedContext: Annotation<string>({
+  retrievedTriples: Annotation<string>({
     reducer: (_prev, next) => next,
     default: () => "",
   }),

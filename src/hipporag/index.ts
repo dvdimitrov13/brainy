@@ -251,37 +251,39 @@ export class HippoRAG {
   }
 
   // ══════════════════════════════════════════════
-  // RETRIEVAL PIPELINE
+  // RETRIEVAL PIPELINE (two-phase)
+  //
+  // Phase 1: retrieveTriples — fast, automatic every turn
+  //   Embed query → dense triple match → LLM filter (recognition memory)
+  //   Returns lightweight triple associations the agent can see
+  //
+  // Phase 2: retrievePassages — agent-initiated "deep recall"
+  //   Takes filtered triples → PPR over knowledge graph → return passages
+  //   Only runs when the agent actively decides to recall
+  //
+  // retrieve() is a convenience that runs both phases.
   // ══════════════════════════════════════════════
 
   /**
-   * Retrieve the most relevant stored passages for a query.
+   * Phase 1: Retrieve and filter relevant triples for a query.
    *
-   * This is the full HippoRAG2 retrieval pipeline:
-   *   1. Embed the query
-   *   2. Dense retrieval: find top-K triples by embedding similarity
-   *   3. Recognition memory: LLM filters candidate triples
-   *   4. Build PPR personalisation vector from filtered triples + DPR scores
-   *   5. Run Personalized PageRank
-   *   6. Extract and return top-K passage scores
+   * This is the "automatic association" step — fast and lightweight.
+   * Runs every turn to give the agent awareness of relevant connections
+   * without the cost of full PPR passage retrieval.
    *
-   * If no triples survive filtering, falls back to dense passage retrieval.
+   * Pipeline: embed query → cosine similarity on fact embeddings →
+   *   top-K candidates → LLM recognition memory filter
    *
-   * @param query — the user's question / retrieval query
-   * @param topK  — number of passages to return (default from config)
-   * @returns array of Passage objects, most relevant first
+   * @param query — the user's message
+   * @returns filtered triples that passed recognition memory
    */
-  async retrieve(query: string, topK?: number): Promise<Passage[]> {
-    const k = topK ?? this.config.retrievalTopK;
-
-    // If we have no indexed passages, return empty
+  async retrieveTriples(query: string): Promise<Triple[]> {
     if (this.passages.size === 0) return [];
 
     // ── Step 1: Embed the query ──
     const queryEmbedding = await embedQuery(query);
 
     // ── Step 2: Get fact scores (dense triple retrieval) ──
-    // Compute cosine similarity between query and all stored triple embeddings
     const factIds = this.factStore.getAllIds();
     const factScores: number[] = [];
 
@@ -294,50 +296,96 @@ export class HippoRAG {
       }
     }
 
-    // Min-max normalize scores (matching HippoRAG Python)
     const normalizedFactScores = minMaxNormalize(factScores);
 
     // ── Step 3: Get top-K candidate triples ──
-    // Create index-score pairs, sort descending, take top linkingTopK
     const candidateIndices = normalizedFactScores
       .map((score, idx) => ({ idx, score }))
       .sort((a, b) => b.score - a.score)
       .slice(0, this.config.linkingTopK);
 
     const candidateTriples: Triple[] = [];
-    const candidateFactScores: number[] = [];
 
-    for (const { idx, score } of candidateIndices) {
+    for (const { idx } of candidateIndices) {
       const factId = factIds[idx];
       if (factId) {
         const triple = this.factIdToTriple.get(factId);
         if (triple) {
           candidateTriples.push(triple);
-          candidateFactScores.push(score);
         }
       }
     }
 
     // ── Step 4: Recognition memory — LLM filters triples ──
-    const filteredTriples = await filterTriples(query, candidateTriples);
+    return await filterTriples(query, candidateTriples);
+  }
 
-    // ── Step 5: Build personalisation vector or fallback to DPR ──
-    if (filteredTriples.length === 0) {
-      // No relevant triples found — fallback to Dense Passage Retrieval
+  /**
+   * Phase 2: Retrieve full passages using filtered triples as seeds.
+   *
+   * This is the "deep recall" step — the agent calls this when it sees
+   * relevant triples and wants the actual passage content. Runs PPR
+   * over the knowledge graph to find passages connected to the triple
+   * entities through multi-hop entity chains.
+   *
+   * Falls back to dense passage retrieval (DPR) if no triples provided.
+   *
+   * @param query — the original query (needed for DPR fallback + passage scoring)
+   * @param triples — filtered triples from retrieveTriples() that seed the PPR
+   * @param topK — number of passages to return
+   * @returns array of Passage objects, most relevant first
+   */
+  async retrievePassages(
+    query: string,
+    triples: Triple[],
+    topK?: number
+  ): Promise<Passage[]> {
+    const k = topK ?? this.config.retrievalTopK;
+
+    if (this.passages.size === 0) return [];
+
+    const queryEmbedding = await embedQuery(query);
+
+    // If no triples, fallback to dense passage retrieval
+    if (triples.length === 0) {
       return this.densePassageRetrieval(queryEmbedding, k);
     }
 
-    // Build phrase (entity) weights from filtered triples
-    // (matches graph_search_with_fact_entities in HippoRAG Python)
+    // Recompute fact scores for the provided triples to build phrase weights
+    const factIds = this.factStore.getAllIds();
+    const factScores: number[] = [];
+
+    for (const factId of factIds) {
+      const factEmb = this.factStore.getEmbedding(factId);
+      if (factEmb) {
+        factScores.push(cosineSimilarity(queryEmbedding, factEmb));
+      } else {
+        factScores.push(0);
+      }
+    }
+
+    const normalizedFactScores = minMaxNormalize(factScores);
+
+    // Build a lookup from triple → fact score
+    const tripleScoreMap = new Map<string, number>();
+    for (let i = 0; i < factIds.length; i++) {
+      const factId = factIds[i];
+      if (factId) {
+        const triple = this.factIdToTriple.get(factId);
+        if (triple) {
+          const key = `${triple.subject}|${triple.predicate}|${triple.object}`;
+          tripleScoreMap.set(key, normalizedFactScores[i] ?? 0);
+        }
+      }
+    }
+
+    // Build phrase (entity) weights from the provided triples
     const phraseWeights = new Map<string, number>();
     const phraseOccurrences = new Map<string, number>();
 
-    for (let i = 0; i < filteredTriples.length; i++) {
-      const triple = filteredTriples[i]!;
-      // Find this triple's dense score (from the original candidate list)
-      const originalIdx = candidateTriples.indexOf(triple);
-      const factScore =
-        originalIdx >= 0 ? (candidateFactScores[originalIdx] ?? 0) : 0;
+    for (const triple of triples) {
+      const key = `${triple.subject}|${triple.predicate}|${triple.object}`;
+      const factScore = tripleScoreMap.get(key) ?? 0;
 
       for (const entityName of [triple.subject, triple.object]) {
         const entityId = computeHashId(
@@ -345,10 +393,8 @@ export class HippoRAG {
           "entity-"
         );
 
-        // Only include entities that exist in the graph
         if (!this.graph.hasNode(entityId)) continue;
 
-        // Weight by inverse of chunk count (entities in fewer chunks are more specific)
         const chunkCount = this.entityToChunkIds.get(entityId)?.size ?? 1;
         const weightedScore = factScore / chunkCount;
 
@@ -363,7 +409,6 @@ export class HippoRAG {
       }
     }
 
-    // Average phrase weights by occurrence count (matching HippoRAG)
     for (const [entityId, totalWeight] of phraseWeights) {
       const occurrences = phraseOccurrences.get(entityId) ?? 1;
       phraseWeights.set(entityId, totalWeight / occurrences);
@@ -384,35 +429,32 @@ export class HippoRAG {
 
     const normalizedPassageScores = minMaxNormalize(passageScores);
 
-    // Build the combined personalisation vector for PPR
+    // Build combined personalisation vector for PPR
     const resetProb = new Map<string, number>();
 
-    // Add phrase weights
     for (const [entityId, weight] of phraseWeights) {
       resetProb.set(entityId, weight);
     }
 
-    // Add passage weights (scaled by passageNodeWeight)
     for (let i = 0; i < passageIds.length; i++) {
       const pId = passageIds[i]!;
       const pScore = normalizedPassageScores[i] ?? 0;
       resetProb.set(pId, pScore * this.config.passageNodeWeight);
     }
 
-    // ── Step 6: Run Personalized PageRank ──
+    // Run Personalized PageRank
     const pprScores = this.graph.personalizedPageRank(
       resetProb,
       this.config.damping
     );
 
-    // ── Step 7: Extract passage scores and return top-K ──
+    // Extract passage scores and return top-K
     const rankedPassages = this.graph.getPassageScores(pprScores);
 
     const results: Passage[] = [];
     for (const { id } of rankedPassages.slice(0, k)) {
       const passage = this.passages.get(id);
       if (passage) {
-        // Update access stats (for semantic forgetting recency boost)
         passage.accessCount++;
         passage.lastAccessed = Date.now();
         results.push(passage);
@@ -420,6 +462,18 @@ export class HippoRAG {
     }
 
     return results;
+  }
+
+  /**
+   * Full retrieval pipeline (convenience method).
+   *
+   * Runs both phases: retrieveTriples → retrievePassages.
+   * Used by the eval harness and anywhere the full pipeline is needed
+   * without the agent deciding.
+   */
+  async retrieve(query: string, topK?: number): Promise<Passage[]> {
+    const triples = await this.retrieveTriples(query);
+    return this.retrievePassages(query, triples, topK);
   }
 
   // ══════════════════════════════════════════════

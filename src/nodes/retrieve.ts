@@ -1,58 +1,50 @@
 /**
- * retrieve.ts — LangGraph node that queries both memory stores.
+ * retrieve.ts — LangGraph node that surfaces relevant associations.
  *
- * This is the first node in the pipeline. It takes the user's message
- * and retrieves relevant context from:
- *   1. HippoRAG2 vector memory (episodic recall via PPR)
- *   2. Compact memory (already in state — no action needed)
+ * This runs Phase 1 of HippoRAG retrieval: triple matching + recognition
+ * memory filtering. The result is a lightweight set of entity associations
+ * (triples) that the agent sees every turn.
  *
- * The retrieved passages are formatted into a string and stored in
- * state.retrievedContext, which the respond node will inject into
- * the LLM prompt.
+ * The agent does NOT get full passages here — those require actively
+ * calling the "recall" tool (Phase 2: PPR over the knowledge graph).
+ * This mirrors how memory works: associations surface automatically,
+ * but recalling the full context takes deliberate effort.
  *
  * Graph position: START → [retrieve] → respond → memorize → END
- *
- * TS note for Python devs:
- *   - `typeof BrainyState.State` is the TypeScript type of the state object.
- *     It's like type-hinting a function parameter as `state: BrainyStateDict`.
- *   - `Partial<typeof BrainyState.State>` means "an object with some (not all)
- *     of the state's fields". Nodes return partial updates — LangGraph merges
- *     them into the full state using the reducers.
  */
 
 import type { BrainyState } from "../state.ts";
 import { hipporag } from "../singletons.ts";
+import { tripleToString } from "../hipporag/openie.ts";
 
 /**
- * Retrieve relevant memories for the current user message.
+ * Retrieve relevant memory associations for the current user message.
  *
- * @param state — current graph state (contains userMessage, compactSummary, etc.)
- * @returns partial state update with retrievedContext populated
+ * @param state — current graph state (contains userMessage)
+ * @returns partial state update with retrievedTriples populated
  */
 export async function retrieveNode(
   state: typeof BrainyState.State
 ): Promise<Partial<typeof BrainyState.State>> {
   const query = state.userMessage;
 
-  // Skip retrieval if no message or no indexed passages yet
   if (!query) {
-    return { retrievedContext: "" };
+    return { retrievedTriples: "" };
   }
 
-  // Query HippoRAG2 for relevant passages
-  // This runs the full pipeline: dense retrieval → recognition memory → PPR
-  const passages = await hipporag.retrieve(query, 3);
+  // Phase 1: get filtered triples (fast, no PPR)
+  const triples = await hipporag.retrieveTriples(query);
 
-  // Format retrieved passages into a readable context string
-  let retrievedContext = "";
-  if (passages.length > 0) {
-    retrievedContext = passages
+  // Format triples as a readable string for the agent
+  let retrievedTriples = "";
+  if (triples.length > 0) {
+    retrievedTriples = triples
       .map(
-        (passage, i) =>
-          `[Memory ${i + 1}]: ${passage.text}`
+        (t, i) =>
+          `${i + 1}. (${t.subject}, ${t.predicate}, ${t.object})`
       )
-      .join("\n\n");
+      .join("\n");
   }
 
-  return { retrievedContext };
+  return { retrievedTriples };
 }
