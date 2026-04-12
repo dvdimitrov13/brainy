@@ -201,18 +201,87 @@ export default function QuestionDetail({ result, onBack }: Props) {
           <h3>Generated Answer</h3>
           <p>{result.generatedAnswer}</p>
         </div>
-        <div className="detail-card full-width">
-          <h3>Retrieved Context (from HippoRAG)</h3>
-          <pre>{result.retrievedContext || "(no passages retrieved)"}</pre>
-        </div>
-        <div className="detail-card full-width">
-          <h3>Conversation Buffer (at question time)</h3>
-          <pre>
-            {result.conversationBuffer?.slice(0, 1000) || "(empty)"}
-            {(result.conversationBuffer?.length ?? 0) > 1000 ? "\n..." : ""}
-          </pre>
-        </div>
       </div>
+
+      {/* Two-phase retrieval pipeline visualization */}
+      {result.retrieval ? (
+        <div className="retrieval-pipeline">
+          <h3>Retrieval Pipeline</h3>
+
+          <div className="pipeline-phase">
+            <div className="phase-header">
+              <span className="phase-label">Phase 1: Triple Associations</span>
+              <span className="phase-timing">
+                {result.retrieval.tripleRetrievalMs}ms
+              </span>
+              <span className="phase-auto-badge">automatic</span>
+            </div>
+            {result.retrieval.triples.length > 0 ? (
+              <div className="triple-list">
+                {result.retrieval.triples.map((t, i) => (
+                  <div key={i} className="triple-item">
+                    <span className="triple-entity">{t.subject}</span>
+                    <span className="triple-predicate">{t.predicate}</span>
+                    <span className="triple-entity">{t.object}</span>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="phase-empty">No relevant triples found</div>
+            )}
+          </div>
+
+          <div className="pipeline-arrow">
+            {result.retrieval.triples.length > 0
+              ? "Agent calls recall_memory tool"
+              : "Fallback to dense passage retrieval"}
+          </div>
+
+          <div className="pipeline-phase">
+            <div className="phase-header">
+              <span className="phase-label">Phase 2: Passage Recall (PPR)</span>
+              <span className="phase-timing">
+                {result.retrieval.passageRetrievalMs}ms
+              </span>
+              <span className="phase-tool-badge">tool call</span>
+            </div>
+            {result.retrieval.passages.length > 0 ? (
+              <div className="passage-list">
+                {result.retrieval.passages.map((p, i) => (
+                  <div key={i} className="passage-item">
+                    <span className="passage-idx">{i + 1}</span>
+                    <span className="passage-text">
+                      {p.text.slice(0, 200)}
+                      {p.text.length > 200 ? "..." : ""}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="phase-empty">No passages retrieved</div>
+            )}
+          </div>
+        </div>
+      ) : (
+        <div className="detail-cards">
+          <div className="detail-card full-width">
+            <h3>Retrieved Context (from HippoRAG)</h3>
+            <pre>{result.retrievedContext || "(no passages retrieved)"}</pre>
+          </div>
+        </div>
+      )}
+
+      {result.conversationBuffer && (
+        <div className="detail-cards">
+          <div className="detail-card full-width">
+            <h3>Conversation Buffer (at question time)</h3>
+            <pre>
+              {result.conversationBuffer.slice(0, 1000)}
+              {result.conversationBuffer.length > 1000 ? "\n..." : ""}
+            </pre>
+          </div>
+        </div>
+      )}
 
       {result.turns.length > 0 && (
         <div className="timeline-section">

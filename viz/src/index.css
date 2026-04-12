@@ -288,6 +288,144 @@ body {
   grid-column: 1 / -1;
 }
 
+/* ── Retrieval pipeline ── */
+
+.retrieval-pipeline {
+  margin-bottom: 1.5rem;
+  text-align: left;
+}
+
+.retrieval-pipeline h3 {
+  font-size: 1rem;
+  font-weight: 600;
+  margin-bottom: 1rem;
+}
+
+.pipeline-phase {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1rem;
+}
+
+.phase-header {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 0.75rem;
+}
+
+.phase-label {
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.phase-timing {
+  font-size: 0.75rem;
+  color: var(--text-dim);
+}
+
+.phase-auto-badge {
+  font-size: 0.6rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 0.1rem 0.4rem;
+  border-radius: 3px;
+  background: rgba(108, 140, 255, 0.15);
+  color: var(--accent);
+  margin-left: auto;
+}
+
+.phase-tool-badge {
+  font-size: 0.6rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 0.1rem 0.4rem;
+  border-radius: 3px;
+  background: var(--summarize-bg);
+  color: var(--summarize);
+  margin-left: auto;
+}
+
+.phase-empty {
+  font-size: 0.8rem;
+  color: var(--text-dim);
+  font-style: italic;
+}
+
+.pipeline-arrow {
+  text-align: center;
+  padding: 0.5rem 0;
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  position: relative;
+}
+
+.pipeline-arrow::before {
+  content: "↓ ";
+}
+
+.triple-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.triple-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.8rem;
+}
+
+.triple-entity {
+  background: rgba(108, 140, 255, 0.1);
+  color: var(--accent);
+  padding: 0.15rem 0.4rem;
+  border-radius: 3px;
+  font-weight: 500;
+}
+
+.triple-predicate {
+  color: var(--text-dim);
+  font-size: 0.75rem;
+}
+
+.passage-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.passage-item {
+  display: flex;
+  gap: 0.5rem;
+  font-size: 0.8rem;
+  line-height: 1.4;
+}
+
+.passage-idx {
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--surface-hover);
+  color: var(--text-dim);
+  border-radius: 3px;
+  font-size: 0.7rem;
+  font-weight: 700;
+}
+
+.passage-text {
+  color: var(--text-dim);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 /* ── Turn timeline ── */
 
 .timeline-section {

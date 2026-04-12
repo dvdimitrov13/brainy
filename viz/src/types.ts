@@ -12,6 +12,14 @@ export interface TurnSnapshot {
   kgStats: { passages: number; entities: number; facts: number };
 }
 
+/** Two-phase retrieval trace */
+export interface RetrievalTrace {
+  triples: { subject: string; predicate: string; object: string }[];
+  passages: { text: string; score?: number }[];
+  tripleRetrievalMs: number;
+  passageRetrievalMs: number;
+}
+
 /** Result of evaluating a single question */
 export interface EvalResult {
   questionId: string;
@@ -26,6 +34,7 @@ export interface EvalResult {
   indexingTimeMs: number;
   retrievalTimeMs: number;
   turns: TurnSnapshot[];
+  retrieval?: RetrievalTrace;
 }
 
 /** Lightweight question entry from the dataset API */

@@ -61,6 +61,18 @@ export interface TurnSnapshot {
   kgStats: { passages: number; entities: number; facts: number };
 }
 
+/** Tracks the two-phase retrieval pipeline for visualization */
+export interface RetrievalTrace {
+  /** Phase 1: triples surfaced automatically */
+  triples: { subject: string; predicate: string; object: string }[];
+  /** Phase 2: passages retrieved via PPR (the "recall" step) */
+  passages: { text: string; score?: number }[];
+  /** Time for Phase 1 (triple retrieval + recognition memory) */
+  tripleRetrievalMs: number;
+  /** Time for Phase 2 (PPR + passage ranking) */
+  passageRetrievalMs: number;
+}
+
 /** Result of evaluating a single question — enriched with turn-level data */
 export interface EvalResult {
   questionId: string;
@@ -75,6 +87,8 @@ export interface EvalResult {
   indexingTimeMs: number;
   retrievalTimeMs: number;
   turns: TurnSnapshot[];
+  /** Two-phase retrieval trace for visualization */
+  retrieval: RetrievalTrace;
 }
 
 // ══════════════════════════════════════════════
@@ -303,13 +317,33 @@ export async function evaluateQuestion(
 
   const indexingTimeMs = Date.now() - indexStart;
 
-  const retrievalStart = Date.now();
-  const passages = await hipporag.retrieve(item.question, 5);
-  const retrievalTimeMs = Date.now() - retrievalStart;
+  // ── Phase 1: Retrieve triples (automatic associations) ──
+  const tripleStart = Date.now();
+  const triples = await hipporag.retrieveTriples(item.question);
+  const tripleRetrievalMs = Date.now() - tripleStart;
+
+  // ── Phase 2: Retrieve passages via PPR (the "recall" tool) ──
+  const passageStart = Date.now();
+  const passages = await hipporag.retrievePassages(item.question, triples, 5);
+  const passageRetrievalMs = Date.now() - passageStart;
+
+  const retrievalTimeMs = tripleRetrievalMs + passageRetrievalMs;
 
   const retrievedContext = passages
     .map((p, i) => `[Memory ${i + 1}]: ${p.text}`)
     .join("\n\n");
+
+  // Build the retrieval trace for frontend visualization
+  const retrieval: RetrievalTrace = {
+    triples: triples.map((t) => ({
+      subject: t.subject,
+      predicate: t.predicate,
+      object: t.object,
+    })),
+    passages: passages.map((p) => ({ text: p.text })),
+    tripleRetrievalMs,
+    passageRetrievalMs,
+  };
 
   const memoryBlock = [
     conversationBuffer && `Conversation context:\n${conversationBuffer}`,
@@ -361,6 +395,7 @@ ${memoryBlock}
     indexingTimeMs,
     retrievalTimeMs,
     turns,
+    retrieval,
   };
 }
 
