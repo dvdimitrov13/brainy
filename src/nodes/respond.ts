@@ -26,6 +26,7 @@ import {
 import type { BrainyState } from "../state.ts";
 import { llm } from "../llm.ts";
 import { hipporag } from "../singletons.ts";
+import { chunkRerankPack } from "../chunking.ts";
 import type { Triple } from "../hipporag/types.ts";
 
 /**
@@ -163,11 +164,11 @@ ${memoryBlock ? `--- Your Memories ---\n${memoryBlock}\n--- End Memories ---` : 
           5
         );
 
-        const passageText = passages.length > 0
-          ? passages
-              .map((p, idx) => `[Memory ${idx + 1}]: ${p.text}`)
-              .join("\n\n")
-          : "No relevant memories found.";
+        // Chunk, rerank, and pack within 1024 token budget
+        const passageText = await chunkRerankPack(
+          query,
+          passages.map((p) => p.text)
+        );
 
         messages.push(
           new ToolMessage({

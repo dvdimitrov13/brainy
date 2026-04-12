@@ -16,6 +16,8 @@ export interface TurnSnapshot {
 export interface RetrievalTrace {
   triples: { subject: string; predicate: string; object: string }[];
   passages: { text: string; score?: number }[];
+  /** Reranked + packed chunks within token budget (what the LLM actually sees) */
+  rerankedContext: string;
   tripleRetrievalMs: number;
   passageRetrievalMs: number;
 }

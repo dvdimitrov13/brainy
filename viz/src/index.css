@@ -349,6 +349,28 @@ body {
   margin-left: auto;
 }
 
+.phase-rerank-badge {
+  font-size: 0.6rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 0.1rem 0.4rem;
+  border-radius: 3px;
+  background: rgba(74, 222, 128, 0.1);
+  color: var(--pass);
+  margin-left: auto;
+}
+
+.reranked-content {
+  font-size: 0.8rem;
+  line-height: 1.5;
+  color: var(--text-dim);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 300px;
+  overflow-y: auto;
+}
+
 .phase-empty {
   font-size: 0.8rem;
   color: var(--text-dim);

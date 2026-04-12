@@ -21,6 +21,7 @@
 import { HippoRAG } from "./hipporag/index.ts";
 import { CompactMemory } from "./memory/compact-memory.ts";
 import { llm } from "./llm.ts";
+import { chunkRerankPack } from "./chunking.ts";
 import { HumanMessage, SystemMessage } from "@langchain/core/messages";
 
 // ══════════════════════════════════════════════
@@ -65,11 +66,13 @@ export interface TurnSnapshot {
 export interface RetrievalTrace {
   /** Phase 1: triples surfaced automatically */
   triples: { subject: string; predicate: string; object: string }[];
-  /** Phase 2: passages retrieved via PPR (the "recall" step) */
+  /** Phase 2: raw passages retrieved via PPR (before chunking) */
   passages: { text: string; score?: number }[];
+  /** Phase 2 output: reranked and packed chunks within token budget */
+  rerankedContext: string;
   /** Time for Phase 1 (triple retrieval + recognition memory) */
   tripleRetrievalMs: number;
-  /** Time for Phase 2 (PPR + passage ranking) */
+  /** Time for Phase 2 (PPR + chunking + reranking) */
   passageRetrievalMs: number;
 }
 
@@ -325,13 +328,15 @@ export async function evaluateQuestion(
   // ── Phase 2: Retrieve passages via PPR (the "recall" tool) ──
   const passageStart = Date.now();
   const passages = await hipporag.retrievePassages(item.question, triples, 5);
+
+  // Chunk, rerank, and pack within 1024 token budget
+  const retrievedContext = await chunkRerankPack(
+    item.question,
+    passages.map((p) => p.text)
+  );
   const passageRetrievalMs = Date.now() - passageStart;
 
   const retrievalTimeMs = tripleRetrievalMs + passageRetrievalMs;
-
-  const retrievedContext = passages
-    .map((p, i) => `[Memory ${i + 1}]: ${p.text}`)
-    .join("\n\n");
 
   // Build the retrieval trace for frontend visualization
   const retrieval: RetrievalTrace = {
@@ -341,6 +346,7 @@ export async function evaluateQuestion(
       object: t.object,
     })),
     passages: passages.map((p) => ({ text: p.text })),
+    rerankedContext: retrievedContext,
     tripleRetrievalMs,
     passageRetrievalMs,
   };

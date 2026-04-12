@@ -261,6 +261,25 @@ export default function QuestionDetail({ result, onBack }: Props) {
               <div className="phase-empty">No passages retrieved</div>
             )}
           </div>
+
+          <div className="pipeline-arrow">Chunk + rerank + pack within 1024 token budget</div>
+
+          <div className="pipeline-phase">
+            <div className="phase-header">
+              <span className="phase-label">Reranked Context (what the LLM sees)</span>
+              <span className="phase-timing">
+                ~{Math.ceil((result.retrieval.rerankedContext?.length ?? 0) / 4)} tokens
+              </span>
+              <span className="phase-rerank-badge">reranked</span>
+            </div>
+            {result.retrieval.rerankedContext ? (
+              <pre className="reranked-content">
+                {result.retrieval.rerankedContext}
+              </pre>
+            ) : (
+              <div className="phase-empty">No content after reranking</div>
+            )}
+          </div>
         </div>
       ) : (
         <div className="detail-cards">
