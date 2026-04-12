@@ -478,14 +478,15 @@ ${contextParts.join("\n\n")}
           result,
           durationMs: Date.now() - callStart,
         });
-
-        messages.push(
-          new ToolMessage({
-            tool_call_id: toolCall.id ?? `call_${i}`,
-            content: result,
-          })
-        );
       }
+
+      // Every tool call needs a matching ToolMessage
+      messages.push(
+        new ToolMessage({
+          tool_call_id: toolCall.id ?? `call_${i}`,
+          content: result,
+        })
+      );
     }
   }
 
