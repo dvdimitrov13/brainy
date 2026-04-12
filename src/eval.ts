@@ -1,49 +1,41 @@
 /**
- * eval.ts — LongMemEval benchmark evaluation harness.
+ * eval.ts — LongMemEval benchmark evaluation logic.
+ *
+ * Exports core evaluation functions that can be used by both the CLI
+ * and the API server. The CLI entrypoint is at the bottom (runs only
+ * when this file is executed directly, not when imported).
  *
  * Evaluates Brainy's dual-memory system against the LongMemEval benchmark
  * (ICLR 2025). The benchmark tests 5 long-term memory abilities:
+ *   1. Information Extraction (single-session-user/assistant/preference)
+ *   2. Multi-Session Reasoning
+ *   3. Temporal Reasoning
+ *   4. Knowledge Updates
  *
- *   1. Information Extraction (single-session-user, single-session-assistant,
- *      single-session-preference) — recall specific facts from conversation
- *   2. Multi-Session Reasoning — synthesize info across separate sessions
- *   3. Temporal Reasoning — understand time-based relationships
- *   4. Knowledge Updates — handle evolving/contradicting information
- *
- * For each question:
- *   1. Reset memory to fresh state
- *   2. Feed all haystack sessions into HippoRAG + conversation buffer (indexing)
- *   3. Run retrieval + generation for the question
- *   4. Use LLM judge (Claude) to evaluate if the answer is correct
- *   5. Record scores by category
- *
- * Outputs a detailed JSON with turn-level data for frontend visualization.
- *
- * Usage:
- *   bun run src/eval.ts                    # run default sample (5 per category)
- *   bun run src/eval.ts --count 10         # 10 per category
- *   bun run src/eval.ts --count all        # run all 500
- *   bun run src/eval.ts --type multi-session --count 20
+ * Usage (CLI):
+ *   bun run src/eval.ts --count 2
+ *   bun run src/eval.ts --count all
+ *   bun run src/eval.ts --type multi-session --count 5
  */
 
 import { HippoRAG } from "./hipporag/index.ts";
 import { CompactMemory } from "./memory/compact-memory.ts";
-import { llm, embedQuery } from "./llm.ts";
+import { llm } from "./llm.ts";
 import { HumanMessage, SystemMessage } from "@langchain/core/messages";
 
 // ══════════════════════════════════════════════
-// TYPES
+// TYPES (exported for server + frontend)
 // ══════════════════════════════════════════════
 
 /** A single turn in a conversation session */
-interface Turn {
+export interface Turn {
   role: "user" | "assistant";
   content: string;
   has_answer?: boolean;
 }
 
 /** A single evaluation item from the LongMemEval dataset */
-interface EvalItem {
+export interface EvalItem {
   question_id: string;
   question_type: string;
   question: string;
@@ -56,7 +48,7 @@ interface EvalItem {
 }
 
 /** Snapshot of a single indexing turn — for frontend visualization */
-interface TurnSnapshot {
+export interface TurnSnapshot {
   turnIndex: number;
   sessionIndex: number;
   exchangeText: string;
@@ -68,7 +60,7 @@ interface TurnSnapshot {
 }
 
 /** Result of evaluating a single question — enriched with turn-level data */
-interface EvalResult {
+export interface EvalResult {
   questionId: string;
   questionType: string;
   question: string;
@@ -80,42 +72,13 @@ interface EvalResult {
   stats: { passages: number; entities: number; facts: number };
   indexingTimeMs: number;
   retrievalTimeMs: number;
-  /** Turn-by-turn snapshots during indexing */
   turns: TurnSnapshot[];
-}
-
-// ══════════════════════════════════════════════
-// CLI ARGUMENT PARSING
-// ══════════════════════════════════════════════
-
-function parseArgs(): { count: number | "all"; type?: string; dataset: string } {
-  const args = process.argv.slice(2);
-  let count: number | "all" = 5; // default: 5 per category
-  let type: string | undefined;
-  let dataset = "oracle"; // "oracle" or "s"
-
-  for (let i = 0; i < args.length; i++) {
-    if (args[i] === "--count") {
-      const val = args[i + 1];
-      count = val === "all" ? "all" : parseInt(val ?? "5", 10);
-      i++;
-    } else if (args[i] === "--type") {
-      type = args[i + 1];
-      i++;
-    } else if (args[i] === "--dataset") {
-      dataset = args[i + 1] ?? "oracle";
-      i++;
-    }
-  }
-
-  return { count, type, dataset };
 }
 
 // ══════════════════════════════════════════════
 // HELPERS
 // ══════════════════════════════════════════════
 
-/** Rough token estimate (~4 chars per token) */
 function estimateTokens(text: string): number {
   return Math.ceil(text.length / 4);
 }
@@ -124,9 +87,6 @@ function estimateTokens(text: string): number {
 // LLM JUDGE
 // ══════════════════════════════════════════════
 
-/**
- * Use Claude as a judge to evaluate if the generated answer is correct.
- */
 async function judgeAnswer(
   question: string,
   expectedAnswer: string,
@@ -169,22 +129,73 @@ Verdict:`
 }
 
 // ══════════════════════════════════════════════
-// CORE EVALUATION LOGIC
+// CORE EVALUATION LOGIC (exported)
 // ══════════════════════════════════════════════
+
+/**
+ * Load the LongMemEval dataset from disk.
+ */
+export async function loadDataset(
+  dataset: string = "oracle"
+): Promise<EvalItem[]> {
+  const dataPath =
+    dataset === "s"
+      ? "data/longmemeval_s_cleaned.json"
+      : "data/longmemeval_oracle.json";
+
+  return await Bun.file(dataPath).json();
+}
+
+/**
+ * Select a subset of items for evaluation.
+ *
+ * If type is specified, filters to that type. If count is a number,
+ * takes N per type for balanced evaluation.
+ */
+export function selectItems(
+  allItems: EvalItem[],
+  count: number | "all",
+  type?: string
+): EvalItem[] {
+  let items = type
+    ? allItems.filter((i) => i.question_type === type)
+    : allItems;
+
+  if (count !== "all") {
+    if (type) {
+      items = items.slice(0, count);
+    } else {
+      const byType = new Map<string, EvalItem[]>();
+      for (const item of items) {
+        if (!byType.has(item.question_type)) {
+          byType.set(item.question_type, []);
+        }
+        byType.get(item.question_type)!.push(item);
+      }
+
+      items = [];
+      for (const [, typeItems] of byType) {
+        items.push(...typeItems.slice(0, count));
+      }
+    }
+  }
+
+  return items;
+}
 
 /**
  * Evaluate a single LongMemEval question.
  * Captures turn-level snapshots for visualization.
  */
-async function evaluateQuestion(item: EvalItem): Promise<EvalResult> {
-  // ── Step 1: Fresh memory instances ──
+export async function evaluateQuestion(
+  item: EvalItem
+): Promise<EvalResult> {
   const hipporag = new HippoRAG();
   const compactMemory = new CompactMemory();
   let conversationBuffer = "";
   const turns: TurnSnapshot[] = [];
   let globalTurnIndex = 0;
 
-  // ── Step 2: Index all sessions ──
   const indexStart = Date.now();
 
   for (let sessIdx = 0; sessIdx < item.haystack_sessions.length; sessIdx++) {
@@ -204,13 +215,11 @@ async function evaluateQuestion(item: EvalItem): Promise<EvalResult> {
 
       const bufferTokensBefore = estimateTokens(conversationBuffer);
 
-      // Append to buffer
       conversationBuffer = compactMemory.append(
         conversationBuffer,
         exchangeText
       );
 
-      // Check memory pressure
       let summarized = false;
       let summaryText: string | undefined;
 
@@ -245,14 +254,12 @@ async function evaluateQuestion(item: EvalItem): Promise<EvalResult> {
     }
   }
 
-  // Index any remaining buffer content that didn't trigger pressure
   if (conversationBuffer && !conversationBuffer.startsWith("[Summary")) {
     await hipporag.index(conversationBuffer);
   }
 
   const indexingTimeMs = Date.now() - indexStart;
 
-  // ── Step 3: Retrieve relevant context for the question ──
   const retrievalStart = Date.now();
   const passages = await hipporag.retrieve(item.question, 5);
   const retrievalTimeMs = Date.now() - retrievalStart;
@@ -261,12 +268,9 @@ async function evaluateQuestion(item: EvalItem): Promise<EvalResult> {
     .map((p, i) => `[Memory ${i + 1}]: ${p.text}`)
     .join("\n\n");
 
-  // ── Step 4: Generate answer ──
   const memoryBlock = [
-    conversationBuffer &&
-      `Conversation context:\n${conversationBuffer}`,
-    retrievedContext &&
-      `Relevant long-term memories:\n${retrievedContext}`,
+    conversationBuffer && `Conversation context:\n${conversationBuffer}`,
+    retrievedContext && `Relevant long-term memories:\n${retrievedContext}`,
   ]
     .filter(Boolean)
     .join("\n\n");
@@ -293,7 +297,6 @@ ${memoryBlock}
           .map((b) => b.text ?? "")
           .join("");
 
-  // ── Step 5: Judge correctness ──
   const correct = await judgeAnswer(
     item.question,
     item.answer,
@@ -319,57 +322,43 @@ ${memoryBlock}
 }
 
 // ══════════════════════════════════════════════
-// MAIN
+// CLI ENTRYPOINT
+// Only runs when executed directly (not imported)
 // ══════════════════════════════════════════════
+
+function parseArgs(): { count: number | "all"; type?: string; dataset: string } {
+  const args = process.argv.slice(2);
+  let count: number | "all" = 5;
+  let type: string | undefined;
+  let dataset = "oracle";
+
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === "--count") {
+      const val = args[i + 1];
+      count = val === "all" ? "all" : parseInt(val ?? "5", 10);
+      i++;
+    } else if (args[i] === "--type") {
+      type = args[i + 1];
+      i++;
+    } else if (args[i] === "--dataset") {
+      dataset = args[i + 1] ?? "oracle";
+      i++;
+    }
+  }
+
+  return { count, type, dataset };
+}
 
 async function main() {
   const { count, type, dataset } = parseArgs();
 
-  // Load dataset
-  const dataPath =
-    dataset === "s"
-      ? "data/longmemeval_s_cleaned.json"
-      : "data/longmemeval_oracle.json";
-
-  console.log(`Loading ${dataPath}...`);
-  const allItems: EvalItem[] = await Bun.file(dataPath).json();
+  console.log("Loading dataset...");
+  const allItems = await loadDataset(dataset);
   console.log(`Loaded ${allItems.length} questions.\n`);
 
-  // Filter by type if specified
-  let items = type
-    ? allItems.filter((i) => i.question_type === type)
-    : allItems;
+  const items = selectItems(allItems, count, type);
+  console.log(`Running evaluation on ${items.length} questions...\n`);
 
-  if (type) {
-    console.log(`Filtered to ${items.length} questions of type "${type}".`);
-  }
-
-  // Sample if count is not "all"
-  if (count !== "all") {
-    if (type) {
-      items = items.slice(0, count);
-    } else {
-      const byType = new Map<string, EvalItem[]>();
-      for (const item of items) {
-        if (!byType.has(item.question_type)) {
-          byType.set(item.question_type, []);
-        }
-        byType.get(item.question_type)!.push(item);
-      }
-
-      items = [];
-      for (const [typeName, typeItems] of byType) {
-        items.push(...typeItems.slice(0, count));
-        console.log(
-          `  ${typeName}: ${Math.min(count, typeItems.length)} questions`
-        );
-      }
-    }
-  }
-
-  console.log(`\nRunning evaluation on ${items.length} questions...\n`);
-
-  // ── Run evaluation ──
   const results: EvalResult[] = [];
   let completed = 0;
 
@@ -402,73 +391,24 @@ async function main() {
     }
   }
 
-  // ══════════════════════════════════════════════
-  // RESULTS REPORT
-  // ══════════════════════════════════════════════
-
-  console.log("\n" + "═".repeat(70));
-  console.log("  LONGMEMEVAL EVALUATION RESULTS");
-  console.log("═".repeat(70));
-
+  // Report
+  console.log("\n" + "=".repeat(70));
   const totalCorrect = results.filter((r) => r.correct).length;
-  const totalQuestions = results.length;
-  const overallAccuracy = (totalCorrect / totalQuestions) * 100;
-
   console.log(
-    `\n  Overall Accuracy: ${totalCorrect}/${totalQuestions} (${overallAccuracy.toFixed(1)}%)\n`
+    `  Overall: ${totalCorrect}/${results.length} (${((totalCorrect / results.length) * 100).toFixed(1)}%)`
   );
+  console.log("=".repeat(70) + "\n");
 
-  const typeGroups = new Map<string, EvalResult[]>();
-  for (const r of results) {
-    if (!typeGroups.has(r.questionType)) {
-      typeGroups.set(r.questionType, []);
-    }
-    typeGroups.get(r.questionType)!.push(r);
-  }
-
-  console.log("  By question type:");
-  console.log("  " + "─".repeat(66));
-
-  for (const [typeName, typeResults] of typeGroups) {
-    const correct = typeResults.filter((r) => r.correct).length;
-    const total = typeResults.length;
-    const acc = (correct / total) * 100;
-    const bar = "█".repeat(Math.round(acc / 5)) + "░".repeat(20 - Math.round(acc / 5));
-    console.log(
-      `  ${typeName.padEnd(30)} ${correct}/${total}  ${bar} ${acc.toFixed(0)}%`
-    );
-  }
-
-  const avgIndexTime =
-    results.reduce((s, r) => s + r.indexingTimeMs, 0) / results.length;
-  const avgRetrievalTime =
-    results.reduce((s, r) => s + r.retrievalTimeMs, 0) / results.length;
-  const avgEntities =
-    results.reduce((s, r) => s + r.stats.entities, 0) / results.length;
-  const avgFacts =
-    results.reduce((s, r) => s + r.stats.facts, 0) / results.length;
-
-  console.log("\n  Performance:");
-  console.log("  " + "─".repeat(66));
-  console.log(`  Avg indexing time:     ${(avgIndexTime / 1000).toFixed(1)}s per question`);
-  console.log(`  Avg retrieval time:    ${(avgRetrievalTime / 1000).toFixed(1)}s per question`);
-  console.log(`  Avg entities per KG:   ${avgEntities.toFixed(0)}`);
-  console.log(`  Avg facts per KG:      ${avgFacts.toFixed(0)}`);
-
-  console.log("\n" + "═".repeat(70) + "\n");
-
-  // Write detailed results to file (includes turn-level data for viz)
   const outputPath = `data/eval_results_${dataset}_${new Date().toISOString().slice(0, 10)}.json`;
   await Bun.write(outputPath, JSON.stringify(results, null, 2));
-  console.log(`Detailed results saved to ${outputPath}`);
-
-  // Also write to viz/public so the frontend can load it
-  const vizPath = `viz/public/eval_results.json`;
-  await Bun.write(vizPath, JSON.stringify(results, null, 2));
-  console.log(`Frontend data saved to ${vizPath}`);
+  console.log(`Results saved to ${outputPath}`);
 }
 
-main().catch((err) => {
-  console.error("Evaluation failed:", err);
-  process.exit(1);
-});
+// Only run CLI if this file is the entrypoint (not imported by server)
+const isMainModule = import.meta.path === Bun.main;
+if (isMainModule) {
+  main().catch((err) => {
+    console.error("Evaluation failed:", err);
+    process.exit(1);
+  });
+}

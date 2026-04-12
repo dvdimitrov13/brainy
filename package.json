@@ -4,7 +4,10 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "start": "bun run src/index.ts"
+    "start": "bun run src/index.ts",
+    "server": "bun run src/server.ts",
+    "eval": "bun run src/eval.ts",
+    "viz": "cd viz && bun dev"
   },
   "dependencies": {
     "@langchain/langgraph": "^0.2.74",

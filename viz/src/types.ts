@@ -25,3 +25,26 @@ export interface EvalResult {
   retrievalTimeMs: number;
   turns: TurnSnapshot[];
 }
+
+/** Lightweight question entry from the dataset API */
+export interface DatasetQuestion {
+  questionId: string;
+  questionType: string;
+  question: string;
+  answer: string;
+  sessionCount: number;
+}
+
+/** Dataset API response */
+export interface DatasetResponse {
+  questions: DatasetQuestion[];
+  types: string[];
+  total: number;
+}
+
+/** SSE event from the eval API */
+export type SSEEvent =
+  | { type: "start"; total: number }
+  | { type: "progress"; completed: number; total: number; result: EvalResult }
+  | { type: "error"; message: string; completed: number; total: number }
+  | { type: "done"; results: EvalResult[] };

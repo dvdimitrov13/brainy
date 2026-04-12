@@ -1,26 +1,53 @@
 import { useState, useEffect } from "react";
-import type { EvalResult } from "./types";
+import type { EvalResult, DatasetQuestion } from "./types";
+import { useEval } from "./useEval";
 import Overview from "./Overview";
 import QuestionDetail from "./QuestionDetail";
+import EvalControls from "./EvalControls";
+import DatasetBrowser from "./DatasetBrowser";
+
+type View = "overview" | "dataset";
 
 function App() {
-  const [results, setResults] = useState<EvalResult[] | null>(null);
-  const [selected, setSelected] = useState<EvalResult | null>(null);
+  // Dataset state (loaded from API)
+  const [datasetQuestions, setDatasetQuestions] = useState<DatasetQuestion[]>([]);
+  const [datasetTypes, setDatasetTypes] = useState<string[]>([]);
+  const [datasetError, setDatasetError] = useState<string | null>(null);
 
-  // Try to load the default eval results from public/
+  // Results state (from eval runs or loaded file)
+  const [results, setResults] = useState<EvalResult[]>([]);
+  const [selected, setSelected] = useState<EvalResult | null>(null);
+  const [view, setView] = useState<View>("overview");
+
+  // Eval runner
+  const eval_ = useEval();
+
+  // Load dataset from API on mount
   useEffect(() => {
-    fetch("/eval_results.json")
+    fetch("/api/dataset")
       .then((r) => {
-        if (r.ok) return r.json();
-        return null;
+        if (!r.ok) throw new Error("API not available");
+        return r.json();
       })
       .then((data) => {
-        if (Array.isArray(data) && data.length > 0) setResults(data);
+        setDatasetQuestions(data.questions);
+        setDatasetTypes(data.types);
       })
-      .catch(() => {});
+      .catch(() => {
+        setDatasetError(
+          "API server not running. Start it with: bun run src/server.ts"
+        );
+      });
   }, []);
 
-  // Handle file upload
+  // Sync eval results into main results state
+  useEffect(() => {
+    if (eval_.results.length > 0) {
+      setResults(eval_.results);
+    }
+  }, [eval_.results]);
+
+  // Handle file upload (fallback when API not available)
   const handleFile = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -39,25 +66,7 @@ function App() {
     reader.readAsText(file);
   };
 
-  // No data — show upload prompt
-  if (!results) {
-    return (
-      <div className="upload-zone">
-        <h2>Brainy Eval Viewer</h2>
-        <p>
-          Load eval results to visualize. Run{" "}
-          <code>bun run src/eval.ts</code> to generate results, or upload
-          an existing JSON file.
-        </p>
-        <label>
-          Upload eval_results.json
-          <input type="file" accept=".json" onChange={handleFile} />
-        </label>
-      </div>
-    );
-  }
-
-  // Detail view
+  // Detail view for a specific question
   if (selected) {
     return (
       <QuestionDetail
@@ -67,8 +76,80 @@ function App() {
     );
   }
 
-  // Overview
-  return <Overview results={results} onSelect={setSelected} />;
+  const hasApi = datasetQuestions.length > 0;
+  const hasResults = results.length > 0;
+
+  return (
+    <>
+      <div className="header">
+        <h1>Brainy Eval Dashboard</h1>
+        <p>LongMemEval benchmark — evaluate and explore results</p>
+      </div>
+
+      {/* Tab navigation */}
+      {hasApi && (
+        <div className="tab-bar">
+          <button
+            className={`tab ${view === "overview" ? "active" : ""}`}
+            onClick={() => setView("overview")}
+          >
+            Results {hasResults && `(${results.length})`}
+          </button>
+          <button
+            className={`tab ${view === "dataset" ? "active" : ""}`}
+            onClick={() => setView("dataset")}
+          >
+            Dataset ({datasetQuestions.length})
+          </button>
+        </div>
+      )}
+
+      {/* Eval controls (only if API is available) */}
+      {hasApi && (
+        <EvalControls
+          types={datasetTypes}
+          running={eval_.running}
+          completed={eval_.completed}
+          total={eval_.total}
+          onRun={eval_.runSweep}
+          onStop={eval_.stop}
+        />
+      )}
+
+      {/* Error from eval */}
+      {eval_.error && (
+        <div className="error-banner">{eval_.error}</div>
+      )}
+
+      {/* Main content */}
+      {view === "dataset" && hasApi ? (
+        <DatasetBrowser
+          questions={datasetQuestions}
+          types={datasetTypes}
+          running={eval_.running}
+          onRunQuestion={(id) => {
+            eval_.runQuestion(id);
+            setView("overview");
+          }}
+        />
+      ) : hasResults ? (
+        <Overview results={results} onSelect={setSelected} />
+      ) : (
+        <div className="upload-zone">
+          {datasetError && <p className="error-text">{datasetError}</p>}
+          <p>
+            {hasApi
+              ? "Run an eval above, or upload previous results."
+              : "Start the API server to run evals, or upload a results file."}
+          </p>
+          <label>
+            Upload eval_results.json
+            <input type="file" accept=".json" onChange={handleFile} />
+          </label>
+        </div>
+      )}
+    </>
+  );
 }
 
 export default App;

@@ -26,13 +26,6 @@ export default function Overview({ results, onSelect }: Props) {
 
   return (
     <>
-      <div className="header">
-        <h1>Brainy Eval Dashboard</h1>
-        <p>
-          LongMemEval benchmark results — {total} questions, {correct} correct
-        </p>
-      </div>
-
       <div className="stats-grid">
         <div className="stat-card">
           <div className="label">Accuracy</div>
