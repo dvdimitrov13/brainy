@@ -21,7 +21,12 @@
 import { HippoRAG } from "./hipporag/index.ts";
 import { CompactMemory } from "./memory/compact-memory.ts";
 import { llm } from "./llm.ts";
-import { HumanMessage, SystemMessage } from "@langchain/core/messages";
+import {
+  HumanMessage,
+  SystemMessage,
+  AIMessage,
+  ToolMessage,
+} from "@langchain/core/messages";
 
 // ══════════════════════════════════════════════
 // TYPES (exported for server + frontend)
@@ -61,16 +66,20 @@ export interface TurnSnapshot {
   kgStats: { passages: number; entities: number; facts: number };
 }
 
-/** Tracks the two-phase retrieval pipeline for visualization */
+/** A single tool call made by the agent during retrieval */
+export interface ToolCallTrace {
+  tool: "recognize" | "recall";
+  query: string;
+  result: string;
+  durationMs: number;
+}
+
+/** Tracks the agent's tool call decisions for visualization */
 export interface RetrievalTrace {
-  /** Phase 1: triples surfaced automatically */
-  triples: { subject: string; predicate: string; object: string }[];
-  /** Phase 2: passages retrieved via PPR (dense summaries) */
-  passages: { text: string; score?: number }[];
-  /** Time for Phase 1 (triple retrieval + recognition memory) */
-  tripleRetrievalMs: number;
-  /** Time for Phase 2 (PPR + passage ranking) */
-  passageRetrievalMs: number;
+  /** Ordered list of tool calls the agent made */
+  toolCalls: ToolCallTrace[];
+  /** Total retrieval time (all tool calls) */
+  totalRetrievalMs: number;
 }
 
 /** Result of evaluating a single question — enriched with turn-level data */
@@ -323,62 +332,167 @@ export async function evaluateQuestion(
 
   const indexingTimeMs = Date.now() - indexStart;
 
-  // ── Recognize: surface relevant entity associations ──
-  const tripleStart = Date.now();
-  const triples = await hipporag.recognize(item.question);
-  const tripleRetrievalMs = Date.now() - tripleStart;
+  // ── Agent-driven retrieval + answer generation ──
+  // Same tool-calling loop as the live agent. The LLM decides whether
+  // to recognize/recall based on the question and conversation context.
 
-  // ── Recall: retrieve passage summaries via PPR ──
-  const passageStart = Date.now();
-  const passages = await hipporag.recall(item.question, triples);
-  const passageRetrievalMs = Date.now() - passageStart;
+  const TOOLS = [
+    {
+      type: "function" as const,
+      function: {
+        name: "recognize",
+        description:
+          "Search long-term memory for relevant entity associations. " +
+          "Returns relationship triples. Use first to check what you remember.",
+        parameters: {
+          type: "object" as const,
+          properties: {
+            query: {
+              type: "string" as const,
+              description: "A focused query to search memory associations.",
+            },
+          },
+          required: ["query"],
+        },
+      },
+    },
+    {
+      type: "function" as const,
+      function: {
+        name: "recall",
+        description:
+          "Retrieve full conversation summaries from long-term memory. " +
+          "Use after recognize to get actual details.",
+        parameters: {
+          type: "object" as const,
+          properties: {
+            query: {
+              type: "string" as const,
+              description: "The query to search long-term memory for.",
+            },
+          },
+          required: ["query"],
+        },
+      },
+    },
+  ];
 
-  const retrievalTimeMs = tripleRetrievalMs + passageRetrievalMs;
+  const memoryParts: string[] = [];
+  if (conversationBuffer) {
+    memoryParts.push(`Conversation so far:\n${conversationBuffer}`);
+  }
+  const memoryBlock = memoryParts.join("\n\n");
 
-  const retrievedContext = passages
-    .map((p, i) => `[Memory ${i + 1}]: ${p.text}`)
-    .join("\n\n");
-
-  // Build the retrieval trace for frontend visualization
-  const retrieval: RetrievalTrace = {
-    triples: triples.map((t) => ({
-      subject: t.subject,
-      predicate: t.predicate,
-      object: t.object,
-    })),
-    passages: passages.map((p) => ({ text: p.text })),
-    tripleRetrievalMs,
-    passageRetrievalMs,
-  };
-
-  const memoryBlock = [
-    conversationBuffer && `Conversation context:\n${conversationBuffer}`,
-    retrievedContext && `Relevant long-term memories:\n${retrievedContext}`,
-  ]
-    .filter(Boolean)
-    .join("\n\n");
-
-  const response = await llm.invoke([
+  const messages: (SystemMessage | HumanMessage | AIMessage | ToolMessage)[] = [
     new SystemMessage(
-      `You are a helpful assistant with long-term memory of past conversations.
-Use the memories provided below to answer the user's question accurately.
-If you can find the answer in your memories, provide it directly and concisely.
-If you truly cannot find the answer, say so.
+      `You are a helpful, friendly assistant with long-term memory.
 
---- Your Memories ---
-${memoryBlock}
---- End Memories ---`
+You have two memory tools:
+1. **recognize** — search for entity associations in memory. Returns relationship triples.
+2. **recall** — retrieve full conversation summaries. Use after recognize to get details.
+
+If the user asks about something from the past, first recognize to find associations, then recall to get the details. For casual conversation, just respond directly.
+
+Do NOT mention your memory tools or system. Just respond naturally.
+
+${memoryBlock ? `--- Current Session ---\n${memoryBlock}\n--- End Session ---` : "(New conversation — no prior context.)"}`
     ),
     new HumanMessage(item.question),
-  ]);
+  ];
 
-  const generatedAnswer =
-    typeof response.content === "string"
-      ? response.content
-      : (response.content as Array<{ type: string; text?: string }>)
-          .filter((b) => b.type === "text")
-          .map((b) => b.text ?? "")
-          .join("");
+  let lastRecognizedTriples: import("./hipporag/types.ts").Triple[] = [];
+  const toolCallTraces: ToolCallTrace[] = [];
+  const retrievalStart = Date.now();
+
+  const maxToolCalls = 5;
+  let generatedAnswer = "";
+
+  for (let i = 0; i < maxToolCalls; i++) {
+    const response = await llm.invoke(messages, { tools: TOOLS });
+
+    const toolCalls = response.tool_calls;
+
+    if (!toolCalls || toolCalls.length === 0) {
+      generatedAnswer =
+        typeof response.content === "string"
+          ? response.content
+          : (response.content as Array<{ type: string; text?: string }>)
+              .filter((b) => b.type === "text")
+              .map((b) => b.text ?? "")
+              .join("");
+      break;
+    }
+
+    messages.push(response);
+
+    for (const toolCall of toolCalls) {
+      const query = (toolCall.args as { query: string }).query;
+      const callStart = Date.now();
+
+      if (toolCall.name === "recognize") {
+        const triples = await hipporag.recognize(query);
+        lastRecognizedTriples = triples;
+
+        const result =
+          triples.length > 0
+            ? triples
+                .map(
+                  (t, idx) =>
+                    `${idx + 1}. (${t.subject}, ${t.predicate}, ${t.object})`
+                )
+                .join("\n")
+            : "No relevant associations found in memory.";
+
+        toolCallTraces.push({
+          tool: "recognize",
+          query,
+          result,
+          durationMs: Date.now() - callStart,
+        });
+
+        messages.push(
+          new ToolMessage({
+            tool_call_id: toolCall.id ?? `call_${i}`,
+            content: result,
+          })
+        );
+      } else if (toolCall.name === "recall") {
+        const passages = await hipporag.recall(query, lastRecognizedTriples);
+
+        const result =
+          passages.length > 0
+            ? passages
+                .map((p, idx) => `[Memory ${idx + 1}]: ${p.text}`)
+                .join("\n\n")
+            : "No relevant memories found.";
+
+        toolCallTraces.push({
+          tool: "recall",
+          query,
+          result,
+          durationMs: Date.now() - callStart,
+        });
+
+        messages.push(
+          new ToolMessage({
+            tool_call_id: toolCall.id ?? `call_${i}`,
+            content: result,
+          })
+        );
+      }
+    }
+  }
+
+  const retrievalTimeMs = Date.now() - retrievalStart;
+
+  const retrieval: RetrievalTrace = {
+    toolCalls: toolCallTraces,
+    totalRetrievalMs: retrievalTimeMs,
+  };
+
+  if (!generatedAnswer) {
+    generatedAnswer = "I'm having trouble recalling. Could you rephrase?";
+  }
 
   const correct = await judgeAnswer(
     item.question,
@@ -395,7 +509,10 @@ ${memoryBlock}
     expectedAnswer: item.answer,
     generatedAnswer,
     correct,
-    retrievedContext,
+    retrievedContext: toolCallTraces
+      .filter((t) => t.tool === "recall")
+      .map((t) => t.result)
+      .join("\n\n"),
     conversationBuffer,
     stats,
     indexingTimeMs,

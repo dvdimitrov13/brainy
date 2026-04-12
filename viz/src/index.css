@@ -444,6 +444,37 @@ body {
   word-break: break-word;
 }
 
+.retrieval-total {
+  font-size: 0.75rem;
+  font-weight: 400;
+  color: var(--text-dim);
+  margin-left: 0.75rem;
+}
+
+.tool-call-timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.tool-call-item {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1rem;
+}
+
+.tool-call-result {
+  font-size: 0.8rem;
+  line-height: 1.5;
+  color: var(--text-dim);
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin-top: 0.5rem;
+  max-height: 250px;
+  overflow-y: auto;
+}
+
 /* ── Turn timeline ── */
 
 .timeline-section {

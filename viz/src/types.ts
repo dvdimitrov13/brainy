@@ -12,12 +12,18 @@ export interface TurnSnapshot {
   kgStats: { passages: number; entities: number; facts: number };
 }
 
-/** Two-phase retrieval trace */
+/** A single tool call the agent made */
+export interface ToolCallTrace {
+  tool: "recognize" | "recall";
+  query: string;
+  result: string;
+  durationMs: number;
+}
+
+/** Tracks the agent's retrieval decisions */
 export interface RetrievalTrace {
-  triples: { subject: string; predicate: string; object: string }[];
-  passages: { text: string; score?: number }[];
-  tripleRetrievalMs: number;
-  passageRetrievalMs: number;
+  toolCalls: ToolCallTrace[];
+  totalRetrievalMs: number;
 }
 
 /** Result of evaluating a single question */

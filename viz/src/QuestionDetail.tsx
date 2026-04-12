@@ -203,63 +203,39 @@ export default function QuestionDetail({ result, onBack }: Props) {
         </div>
       </div>
 
-      {/* Two-tool retrieval pipeline visualization */}
+      {/* Agent tool call timeline */}
       {result.retrieval ? (
         <div className="retrieval-pipeline">
-          <h3>Memory Retrieval</h3>
+          <h3>
+            Agent Memory Retrieval
+            <span className="retrieval-total">
+              {result.retrieval.totalRetrievalMs}ms total
+              {result.retrieval.toolCalls.length === 0 && " — no tools called"}
+            </span>
+          </h3>
 
-          <div className="pipeline-phase">
-            <div className="phase-header">
-              <span className="phase-label">recognize()</span>
-              <span className="phase-desc">Entity associations (cosine &ge; 0.8 + LLM filter)</span>
-              <span className="phase-timing">
-                {result.retrieval.tripleRetrievalMs}ms
-              </span>
-              <span className="phase-tool-badge">tool</span>
+          {result.retrieval.toolCalls.length === 0 ? (
+            <div className="phase-empty">
+              Agent responded without consulting memory
             </div>
-            {result.retrieval.triples.length > 0 ? (
-              <div className="triple-list">
-                {result.retrieval.triples.map((t, i) => (
-                  <div key={i} className="triple-item">
-                    <span className="triple-entity">{t.subject}</span>
-                    <span className="triple-predicate">{t.predicate}</span>
-                    <span className="triple-entity">{t.object}</span>
+          ) : (
+            <div className="tool-call-timeline">
+              {result.retrieval.toolCalls.map((tc, i) => (
+                <div key={i} className="tool-call-item">
+                  <div className="phase-header">
+                    <span className="phase-label">{tc.tool}()</span>
+                    <span className="phase-desc">
+                      query: "{tc.query.slice(0, 80)}
+                      {tc.query.length > 80 ? "..." : ""}"
+                    </span>
+                    <span className="phase-timing">{tc.durationMs}ms</span>
+                    <span className="phase-tool-badge">{tc.tool}</span>
                   </div>
-                ))}
-              </div>
-            ) : (
-              <div className="phase-empty">No associations above threshold</div>
-            )}
-          </div>
-
-          <div className="pipeline-arrow">
-            {result.retrieval.triples.length > 0
-              ? "Triples seed PPR graph search"
-              : "Fallback to dense passage retrieval"}
-          </div>
-
-          <div className="pipeline-phase">
-            <div className="phase-header">
-              <span className="phase-label">recall()</span>
-              <span className="phase-desc">Passage summaries via PPR (score &ge; 20% of top)</span>
-              <span className="phase-timing">
-                {result.retrieval.passageRetrievalMs}ms
-              </span>
-              <span className="phase-tool-badge">tool</span>
+                  <pre className="tool-call-result">{tc.result}</pre>
+                </div>
+              ))}
             </div>
-            {result.retrieval.passages.length > 0 ? (
-              <div className="passage-list">
-                {result.retrieval.passages.map((p, i) => (
-                  <div key={i} className="passage-item">
-                    <span className="passage-idx">{i + 1}</span>
-                    <span className="passage-text">{p.text}</span>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <div className="phase-empty">No passages retrieved</div>
-            )}
-          </div>
+          )}
         </div>
       ) : (
         <div className="detail-cards">
