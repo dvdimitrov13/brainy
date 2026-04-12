@@ -282,13 +282,14 @@ export async function evaluateQuestion(
       let summaryText: string | undefined;
 
       if (compactMemory.shouldSummarize(conversationBuffer)) {
-        // Summarize each pending exchange individually (4:1 compression)
-        const summaries = await compactMemory.summarizeExchanges(pendingExchanges);
-        // Index each summary into HippoRAG (parallel)
-        await Promise.all(summaries.map((s) => hipporag.index(s)));
-        // Replace buffer with concatenated summaries
-        summaryText = "[Summary of earlier conversation]\n" + summaries.join("\n\n");
-        conversationBuffer = summaryText;
+        // Step 1: Summarize each exchange individually (4:1, parallel)
+        const exchangeSummaries = await compactMemory.summarizeExchanges(pendingExchanges);
+        // Step 2: Summary-of-summaries → single narrative
+        const narrative = await compactMemory.summarizeSummaries(exchangeSummaries);
+        // Step 3: Index the narrative into HippoRAG
+        await hipporag.index(narrative);
+        summaryText = narrative;
+        conversationBuffer = narrative;
         pendingExchanges = [];
         summarized = true;
         hipporag.forget();
@@ -322,8 +323,9 @@ export async function evaluateQuestion(
     // Summarize each pending exchange, then index summaries into long-term memory.
     // HippoRAG is the only memory that persists across sessions.
     if (pendingExchanges.length > 0) {
-      const summaries = await compactMemory.summarizeExchanges(pendingExchanges);
-      await Promise.all(summaries.map((s) => hipporag.index(s)));
+      const exchangeSummaries = await compactMemory.summarizeExchanges(pendingExchanges);
+      const narrative = await compactMemory.summarizeSummaries(exchangeSummaries);
+      await hipporag.index(narrative);
       pendingExchanges = [];
     }
     conversationBuffer = "";

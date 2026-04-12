@@ -45,14 +45,17 @@ export async function memorizeNode(
   // (all tool calls + final response) before checking pressure — don't
   // compress between tool steps.
   if (compactMemory.shouldSummarize(newBuffer)) {
-    // Summarize each pending exchange individually (4:1 compression)
-    const summaries = await compactMemory.summarizeExchanges(newPending);
+    // Step 1: Summarize each pending exchange individually (4:1, parallel)
+    const exchangeSummaries = await compactMemory.summarizeExchanges(newPending);
 
-    // Index each summary into HippoRAG (parallel)
-    await Promise.all(summaries.map((summary) => hipporag.index(summary)));
+    // Step 2: Summary-of-summaries — compress into a single narrative
+    const narrative = await compactMemory.summarizeSummaries(exchangeSummaries);
 
-    // Replace buffer with concatenated summaries
-    newBuffer = "[Summary of earlier conversation]\n" + summaries.join("\n\n");
+    // Step 3: Index the narrative into HippoRAG
+    await hipporag.index(narrative);
+
+    // Replace buffer with the narrative
+    newBuffer = narrative;
     newPending = [];
 
     hipporag.forget();

@@ -100,4 +100,46 @@ Respond with ONLY the compressed exchange, nothing else.`,
   async summarizeExchanges(exchanges: string[]): Promise<string[]> {
     return Promise.all(exchanges.map((ex) => this.summarizeExchange(ex)));
   }
+
+  /**
+   * Create a summary-of-summaries for the conversation buffer.
+   *
+   * Takes the individual exchange summaries and compresses them into
+   * a single narrative thread. This is what replaces the buffer —
+   * the individual summaries are already indexed in HippoRAG, so
+   * the buffer just needs the high-level context.
+   *
+   * @param summaries — array of per-exchange summaries
+   * @returns a single compressed narrative
+   */
+  async summarizeSummaries(summaries: string[]): Promise<string> {
+    const joined = summaries.join("\n\n");
+
+    const response = await llmFast.invoke([
+      {
+        role: "system" as const,
+        content: `Compress these conversation summaries into a single brief narrative (2-3 sentences).
+Capture the overall thread: what topics were discussed, key facts established,
+and where the conversation is heading. Details are stored separately in
+long-term memory — this just needs to provide context for what comes next.
+
+Respond with ONLY the narrative, nothing else.`,
+      },
+      {
+        role: "user" as const,
+        content: joined,
+      },
+    ]);
+
+    const summary =
+      typeof response.content === "string"
+        ? response.content.trim()
+        : (response.content as Array<{ type: string; text?: string }>)
+            .filter((block) => block.type === "text")
+            .map((block) => block.text ?? "")
+            .join("")
+            .trim();
+
+    return `[Summary of earlier conversation]\n${summary}`;
+  }
 }
