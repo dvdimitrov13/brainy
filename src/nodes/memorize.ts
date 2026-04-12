@@ -44,6 +44,11 @@ export async function memorizeNode(
   );
 
   // ── Check memory pressure ──
+  // IMPORTANT: This check runs AFTER the full turn is complete (retrieve →
+  // respond → memorize). We never cut off the agent mid-turn. If tool use
+  // is added later, ensure the agent finishes its entire agentic loop
+  // (all tool calls + final response) before checking pressure — don't
+  // compress between tool steps.
   if (compactMemory.shouldSummarize(newBuffer)) {
     // Buffer exceeded threshold — compress and index
 
