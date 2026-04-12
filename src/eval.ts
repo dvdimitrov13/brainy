@@ -151,7 +151,7 @@ function getEvalTools() {
       function: {
         name: "write_notes",
         description:
-          "Add new notes to your notepad. Organize by topic using section paths. Cite source exchanges with [exchange:ID].",
+          "Add new notes to your notepad. Only note top-level facts (user decisions, purchases, goals, dates, preferences — NOT generic advice). Keep 1-3 lines each, cite [exchange:ID]. Check TOC first to avoid duplicates.",
         parameters: {
           type: "object" as const,
           properties: {
@@ -354,11 +354,20 @@ ${toc}
 
 ${rollingSummary ? `Conversation summary: ${rollingSummary}` : ""}
 
-**Your memory buffer is full. You MUST call write_notes to process these pending exchanges into organized notes:**
+**Your memory buffer is full. You MUST call write_notes to process these pending exchanges into notes.**
 
+Note-taking rules:
+- Only note TOP-LEVEL FACTS: user decisions, purchases, goals, preferences, events, dates, numbers
+- Do NOT note generic advice you gave — you can regenerate that anytime
+- Keep each note to 1-3 lines — cite [exchange:ID] so you can recall details later
+- Include dates/times from the session headers
+- Check the TOC first — if a relevant section exists, use edit_notes to update it instead of creating duplicates
+- Organize hierarchically: use consistent top-level categories with subtopics
+
+Pending exchanges:
 ${pendingExchanges.map((e) => `[exchange:${e.id}]\n${e.text}`).join("\n\n")}
 
-Process these into organized notes with citations, then respond with a brief acknowledgment.`
+Process these into organized notes, then respond briefly.`
           ),
           new HumanMessage("Process the pending exchanges into notes."),
         ];
@@ -417,6 +426,14 @@ Your notepad TOC:
 ${toc}
 
 ${rollingSummary ? `Summary: ${rollingSummary}` : ""}
+
+Note-taking rules:
+- Only note TOP-LEVEL FACTS: user decisions, purchases, goals, preferences, events, dates, numbers
+- Do NOT note generic advice you gave — you can regenerate that anytime
+- Keep each note to 1-3 lines — cite [exchange:ID] so you can recall details later
+- Include dates/times from the session headers
+- Check the TOC first — if a relevant section exists, use edit_notes to update it instead of creating duplicates
+- Organize hierarchically: use consistent top-level categories with subtopics
 
 Pending exchanges:
 ${pendingExchanges.map((e) => `[exchange:${e.id}]\n${e.text}`).join("\n\n")}

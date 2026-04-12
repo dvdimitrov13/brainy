@@ -36,9 +36,12 @@ const WRITE_NOTES_TOOL = {
   function: {
     name: "write_notes",
     description:
-      "Add new notes to your notepad. Organize by topic using section paths. " +
+      "Add new notes to your notepad. Organize hierarchically by topic (e.g., Equipment/Helmet, Trips/June Mountain). " +
       "Cite source exchanges with [exchange:ID]. " +
-      "Use for recording important facts, decisions, preferences, or any information worth remembering.",
+      "Keep notes to top-level facts only (1-3 lines each) — for details, the raw exchange can be recalled later. " +
+      "Include dates/times when available. " +
+      "Before adding, check TOC for existing sections — update via edit_notes instead of duplicating. " +
+      "Do NOT note generic advice you gave — only note facts about the user: decisions, purchases, goals, preferences, events, dates.",
     parameters: {
       type: "object" as const,
       properties: {
@@ -50,12 +53,12 @@ const WRITE_NOTES_TOOL = {
               sectionPath: {
                 type: "string" as const,
                 description:
-                  'Hierarchical path for the note: "Topic/Subtopic". Use "/" for nesting.',
+                  'Hierarchical path: "Topic/Subtopic". Use "/" for nesting. Keep hierarchy consistent.',
               },
               content: {
                 type: "string" as const,
                 description:
-                  "The note content in markdown. Cite exchanges: [exchange:sess0-turn1]",
+                  "Dense, factual note (1-3 lines). Include dates. Cite: [exchange:sess0-turn1]",
               },
               afterSection: {
                 type: "string" as const,
@@ -177,7 +180,20 @@ export async function respondNode(
 
   // Build forced instruction if memory pressure requires note-writing
   const pressureInstruction = state.mustWriteNotes
-    ? `\n\n**IMPORTANT: Your memory buffer is full. You MUST call write_notes NOW to process the pending exchanges into notes before responding to the user. Here are the pending exchanges:\n${state.pendingExchanges.map((e) => `[exchange:${e.id}]\n${e.text}`).join("\n\n")}\n\nProcess these into organized notes, then respond to the user.**`
+    ? `\n\n**IMPORTANT: Your memory buffer is full. You MUST call write_notes NOW to process the pending exchanges into notes before responding to the user.
+
+Note-taking rules:
+- Only note TOP-LEVEL FACTS: user decisions, purchases, goals, preferences, events, dates, numbers
+- Do NOT note generic advice you gave — you can regenerate that anytime
+- Keep each note to 1-3 lines — cite [exchange:ID] so you can recall details later
+- Include dates/times from the session headers
+- Check the TOC first — if a relevant section exists, use edit_notes to update it instead of creating duplicates
+- Organize hierarchically: use consistent top-level categories with subtopics
+
+Pending exchanges:
+${state.pendingExchanges.map((e) => `[exchange:${e.id}]\n${e.text}`).join("\n\n")}
+
+Process these into organized notes, then respond to the user.**`
     : "";
 
   const systemPrompt = `You are a helpful, friendly assistant with a notepad for long-term memory.
