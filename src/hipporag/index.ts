@@ -283,21 +283,34 @@ export class HippoRAG {
     const queryEmbedding = await embedQuery(query);
 
     // ── Step 2: Get fact scores (dense triple retrieval) ──
-    // Use raw cosine similarity with a hard threshold (0.8) instead of
-    // top-K. Only triples genuinely similar to the query pass through.
+    // Score all triples, then take those above the threshold OR the top-K
+    // (whichever yields more). This ensures we always surface at least
+    // linkingTopK candidates even when cosine similarities are low
+    // (common with short fact strings vs full query sentences).
     const factIds = this.factStore.getAllIds();
-    const candidateTriples: Triple[] = [];
+    const scored: { factId: string; sim: number }[] = [];
 
     for (const factId of factIds) {
       const factEmb = this.factStore.getEmbedding(factId);
       if (!factEmb) continue;
+      scored.push({ factId, sim: cosineSimilarity(queryEmbedding, factEmb) });
+    }
 
-      const sim = cosineSimilarity(queryEmbedding, factEmb);
-      if (sim >= this.config.recognizeThreshold) {
-        const triple = this.factIdToTriple.get(factId);
-        if (triple) {
-          candidateTriples.push(triple);
-        }
+    // Sort descending by similarity
+    scored.sort((a, b) => b.sim - a.sim);
+
+    // Take all above threshold, but at least linkingTopK
+    const minK = this.config.linkingTopK;
+    const candidateTriples: Triple[] = [];
+
+    for (let i = 0; i < scored.length; i++) {
+      const { factId, sim } = scored[i]!;
+      // Stop if we're past both the threshold AND the min-K
+      if (i >= minK && sim < this.config.recognizeThreshold) break;
+
+      const triple = this.factIdToTriple.get(factId);
+      if (triple) {
+        candidateTriples.push(triple);
       }
     }
 
@@ -327,10 +340,9 @@ export class HippoRAG {
 
     const queryEmbedding = await embedQuery(query);
 
-    // If no triples, fallback to dense passage retrieval
-    if (triples.length === 0) {
-      return this.densePassageRetrieval(queryEmbedding, this.config.retrievalTopK);
-    }
+    // No triples = nothing to seed PPR with. Return empty.
+    // The agent must recognize before it can recall.
+    if (triples.length === 0) return [];
 
     // Recompute fact scores for the provided triples to build phrase weights
     const factIds = this.factStore.getAllIds();

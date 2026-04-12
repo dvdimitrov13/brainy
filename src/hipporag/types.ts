@@ -89,7 +89,9 @@ export interface HippoRAGConfig {
   linkingTopK: number;
 
   /** Cosine similarity threshold for recognize — only triples above this
-   *  pass through to the LLM filter. 0.8 = must be genuinely similar. */
+   *  pass through to the LLM filter. This is a rough pre-filter; the LLM
+   *  recognition memory is the real quality gate. 0.4 separates relevant
+   *  facts (~0.45-0.55) from noise (~0.2-0.3) with Voyage embeddings. */
   recognizeThreshold: number;
 
   /** Cosine similarity threshold for creating synonym edges between entities. */
