@@ -72,6 +72,21 @@ export const BrainyState = Annotation.Root({
   }),
 
   /**
+   * Exchanges accumulated since the last HippoRAG indexing.
+   *
+   * Each entry is a "User: ...\nAssistant: ..." string. When memory
+   * pressure triggers, each exchange is indexed into HippoRAG as a
+   * separate passage (not the whole buffer as one blob). This keeps
+   * passages granular for better triple extraction and retrieval.
+   *
+   * After indexing, this array is cleared.
+   */
+  pendingExchanges: Annotation<string[]>({
+    reducer: (_prev, next) => next,
+    default: () => [],
+  }),
+
+  /**
    * Formatted string of relevant passages retrieved from HippoRAG.
    * Rebuilt each turn during the retrieve node — purely transient.
    */

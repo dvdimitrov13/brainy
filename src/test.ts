@@ -225,6 +225,7 @@ async function runTest() {
 
     state = {
       conversationBuffer: result.conversationBuffer,
+      pendingExchanges: result.pendingExchanges,
       turnCount: result.turnCount,
     };
 

@@ -112,11 +112,12 @@ async function main() {
         });
 
         // Update our persistent state for the next turn
-        // We carry forward: conversationBuffer, turnCount
+        // We carry forward: conversationBuffer, pendingExchanges, turnCount
         // We do NOT carry: userMessage, aiResponse, retrievedContext
         // (those are per-turn and get overwritten)
         currentState = {
           conversationBuffer: result.conversationBuffer,
+          pendingExchanges: result.pendingExchanges,
           turnCount: result.turnCount,
         };
 

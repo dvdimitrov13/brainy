@@ -217,6 +217,7 @@ export async function evaluateQuestion(
   const hipporag = new HippoRAG();
   const compactMemory = new CompactMemory();
   let conversationBuffer = "";
+  let pendingExchanges: string[] = [];
   const turns: TurnSnapshot[] = [];
   let globalTurnIndex = 0;
 
@@ -244,6 +245,7 @@ export async function evaluateQuestion(
         conversationBuffer,
         exchangeText
       );
+      pendingExchanges.push(exchangeText);
 
       // Capture peak token count AFTER append but BEFORE summarization
       const bufferTokensPeak = estimateTokens(conversationBuffer);
@@ -252,12 +254,15 @@ export async function evaluateQuestion(
       let summaryText: string | undefined;
 
       if (compactMemory.shouldSummarize(conversationBuffer)) {
+        // Index each pending exchange as a separate passage (in parallel)
+        // so HippoRAG gets granular passages with focused triples
         const [summary] = await Promise.all([
           compactMemory.summarize(conversationBuffer),
-          hipporag.index(conversationBuffer),
+          ...pendingExchanges.map((ex) => hipporag.index(ex)),
         ]);
         summaryText = summary;
         conversationBuffer = summary;
+        pendingExchanges = [];
         summarized = true;
         hipporag.forget();
       }
@@ -286,8 +291,9 @@ export async function evaluateQuestion(
     }
   }
 
-  if (conversationBuffer && !conversationBuffer.startsWith("[Summary")) {
-    await hipporag.index(conversationBuffer);
+  // Index any remaining pending exchanges that didn't trigger pressure
+  if (pendingExchanges.length > 0) {
+    await Promise.all(pendingExchanges.map((ex) => hipporag.index(ex)));
   }
 
   const indexingTimeMs = Date.now() - indexStart;
