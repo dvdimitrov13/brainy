@@ -327,7 +327,7 @@ export async function evaluateQuestion(
 
   // ── Phase 2: Retrieve passages via PPR (the "recall" tool) ──
   const passageStart = Date.now();
-  const passages = await hipporag.retrievePassages(item.question, triples, 5);
+  const passages = await hipporag.retrievePassages(item.question, triples);
 
   // Chunk, rerank, and pack within 1024 token budget
   const retrievedContext = await chunkRerankPack(

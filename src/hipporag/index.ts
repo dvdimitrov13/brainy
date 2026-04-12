@@ -337,18 +337,15 @@ export class HippoRAG {
    */
   async retrievePassages(
     query: string,
-    triples: Triple[],
-    topK?: number
+    triples: Triple[]
   ): Promise<Passage[]> {
-    const k = topK ?? this.config.retrievalTopK;
-
     if (this.passages.size === 0) return [];
 
     const queryEmbedding = await embedQuery(query);
 
     // If no triples, fallback to dense passage retrieval
     if (triples.length === 0) {
-      return this.densePassageRetrieval(queryEmbedding, k);
+      return this.densePassageRetrieval(queryEmbedding, this.config.retrievalTopK);
     }
 
     // Recompute fact scores for the provided triples to build phrase weights
@@ -448,11 +445,20 @@ export class HippoRAG {
       this.config.damping
     );
 
-    // Extract passage scores and return top-K
+    // Extract passage scores and apply ratio-to-top threshold
     const rankedPassages = this.graph.getPassageScores(pprScores);
 
+    if (rankedPassages.length === 0) return [];
+
+    const topScore = rankedPassages[0]!.score;
+    const threshold = topScore * this.config.retrievalScoreRatio;
+    const maxResults = this.config.retrievalMaxResults;
+
     const results: Passage[] = [];
-    for (const { id } of rankedPassages.slice(0, k)) {
+    for (const { id, score } of rankedPassages) {
+      if (results.length >= maxResults) break;
+      if (results.length > 0 && score < threshold) break; // always keep at least 1
+
       const passage = this.passages.get(id);
       if (passage) {
         passage.accessCount++;
@@ -471,9 +477,9 @@ export class HippoRAG {
    * Used by the eval harness and anywhere the full pipeline is needed
    * without the agent deciding.
    */
-  async retrieve(query: string, topK?: number): Promise<Passage[]> {
+  async retrieve(query: string): Promise<Passage[]> {
     const triples = await this.retrieveTriples(query);
-    return this.retrievePassages(query, triples, topK);
+    return this.retrievePassages(query, triples);
   }
 
   // ══════════════════════════════════════════════

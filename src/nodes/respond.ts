@@ -160,8 +160,7 @@ ${memoryBlock ? `--- Your Memories ---\n${memoryBlock}\n--- End Memories ---` : 
         // Phase 2: full PPR retrieval using the triples from Phase 1
         const passages = await hipporag.retrievePassages(
           query,
-          triples,
-          5
+          triples
         );
 
         // Chunk, rerank, and pack within 1024 token budget

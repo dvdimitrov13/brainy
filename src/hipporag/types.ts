@@ -97,8 +97,16 @@ export interface HippoRAGConfig {
   /** Maximum stored passages before semantic forgetting kicks in. */
   maxPassages: number;
 
-  /** Default number of passages to return per retrieval query. */
+  /** Default number of passages to return per retrieval query (used for DPR fallback). */
   retrievalTopK: number;
+
+  /** Ratio-to-top threshold for PPR passage retrieval.
+   *  A passage must score at least this fraction of the top-scoring passage
+   *  to be included. 0.2 = must be at least 20% as relevant as the best match. */
+  retrievalScoreRatio: number;
+
+  /** Hard cap on PPR passage results (safety limit). */
+  retrievalMaxResults: number;
 }
 
 /**
@@ -112,4 +120,6 @@ export const DEFAULT_CONFIG: HippoRAGConfig = {
   synonymyTopK: 10,
   maxPassages: 200,
   retrievalTopK: 3,
+  retrievalScoreRatio: 0.2,
+  retrievalMaxResults: 10,
 };
