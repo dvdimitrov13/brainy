@@ -85,14 +85,10 @@ export interface HippoRAGConfig {
    *  Low value (0.05) so phrase nodes dominate the seed signal. */
   passageNodeWeight: number;
 
-  /** Number of top triples to retrieve for recognition memory filtering (used in recall). */
+  /** Number of top triples to retrieve before LLM filtering.
+   *  Triples are small so we cast a wide net — the LLM recognition
+   *  memory filter is the real quality gate. */
   linkingTopK: number;
-
-  /** Cosine similarity threshold for recognize — only triples above this
-   *  pass through to the LLM filter. This is a rough pre-filter; the LLM
-   *  recognition memory is the real quality gate. 0.4 separates relevant
-   *  facts (~0.45-0.55) from noise (~0.2-0.3) with Voyage embeddings. */
-  recognizeThreshold: number;
 
   /** Cosine similarity threshold for creating synonym edges between entities. */
   synonymyThreshold: number;
@@ -121,8 +117,7 @@ export interface HippoRAGConfig {
 export const DEFAULT_CONFIG: HippoRAGConfig = {
   damping: 0.5,
   passageNodeWeight: 0.05,
-  linkingTopK: 5,
-  recognizeThreshold: 0.8,
+  linkingTopK: 25,
   synonymyThreshold: 0.8,
   synonymyTopK: 10,
   maxPassages: 200,

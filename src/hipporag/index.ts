@@ -282,11 +282,9 @@ export class HippoRAG {
     // ── Step 1: Embed the query ──
     const queryEmbedding = await embedQuery(query);
 
-    // ── Step 2: Get fact scores (dense triple retrieval) ──
-    // Score all triples, then take those above the threshold OR the top-K
-    // (whichever yields more). This ensures we always surface at least
-    // linkingTopK candidates even when cosine similarities are low
-    // (common with short fact strings vs full query sentences).
+    // ── Step 2: Get top-K candidate triples by cosine similarity ──
+    // Cast a wide net (top 25) — triples are small so this is cheap.
+    // The LLM recognition memory filter is the real quality gate.
     const factIds = this.factStore.getAllIds();
     const scored: { factId: string; sim: number }[] = [];
 
@@ -296,22 +294,12 @@ export class HippoRAG {
       scored.push({ factId, sim: cosineSimilarity(queryEmbedding, factEmb) });
     }
 
-    // Sort descending by similarity
     scored.sort((a, b) => b.sim - a.sim);
 
-    // Take all above threshold, but at least linkingTopK
-    const minK = this.config.linkingTopK;
     const candidateTriples: Triple[] = [];
-
-    for (let i = 0; i < scored.length; i++) {
-      const { factId, sim } = scored[i]!;
-      // Stop if we're past both the threshold AND the min-K
-      if (i >= minK && sim < this.config.recognizeThreshold) break;
-
+    for (const { factId } of scored.slice(0, this.config.linkingTopK)) {
       const triple = this.factIdToTriple.get(factId);
-      if (triple) {
-        candidateTriples.push(triple);
-      }
+      if (triple) candidateTriples.push(triple);
     }
 
     // ── Step 4: Recognition memory — LLM filters triples ──
