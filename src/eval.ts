@@ -255,7 +255,6 @@ export async function evaluateQuestion(
 
       if (compactMemory.shouldSummarize(conversationBuffer)) {
         // Index each pending exchange as a separate passage (in parallel)
-        // so HippoRAG gets granular passages with focused triples
         const [summary] = await Promise.all([
           compactMemory.summarize(conversationBuffer),
           ...pendingExchanges.map((ex) => hipporag.index(ex)),
@@ -289,11 +288,17 @@ export async function evaluateQuestion(
       turns.push(snapshot);
       onTurn?.(snapshot, totalTurns);
     }
-  }
 
-  // Index any remaining pending exchanges that didn't trigger pressure
-  if (pendingExchanges.length > 0) {
-    await Promise.all(pendingExchanges.map((ex) => hipporag.index(ex)));
+    // ── Session boundary: flush everything into HippoRAG ──
+    // Each session is a separate conversation (like a new ChatGPT thread).
+    // Index all pending exchanges into long-term memory and reset the buffer.
+    // HippoRAG is the only memory that persists across sessions.
+    if (pendingExchanges.length > 0) {
+      await Promise.all(pendingExchanges.map((ex) => hipporag.index(ex)));
+      pendingExchanges = [];
+    }
+    conversationBuffer = "";
+    hipporag.forget();
   }
 
   const indexingTimeMs = Date.now() - indexStart;
