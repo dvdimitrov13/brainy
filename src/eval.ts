@@ -458,10 +458,12 @@ export async function evaluateQuestion(
   }
 
   const indexingTimeMs = Date.now() - indexStart;
+  console.log(`  [eval] Indexing complete: ${indexingTimeMs}ms, ${hipporag.getStats().passages} passages`);
 
   // ══════════════════════════════════════════════
   // ANSWER GENERATION (agent tool-calling loop)
   // ══════════════════════════════════════════════
+  console.log(`  [eval] Starting answer generation...`);
 
   const TOOLS = getEvalTools();
 
@@ -499,6 +501,7 @@ ${contextParts.join("\n\n")}
   let generatedAnswer = "";
 
   for (let i = 0; i < 6; i++) {
+    console.log(`  [eval] LLM call ${i + 1}...`);
     const response = await llm.invoke(messages, { tools: TOOLS });
     const toolCalls = response.tool_calls;
 

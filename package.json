@@ -5,7 +5,8 @@
   "private": true,
   "scripts": {
     "start": "bun run src/index.ts",
-    "server": "bun --watch run src/server.ts",
+    "server": "bun run src/server.ts",
+    "server:dev": "bun --watch run src/server.ts",
     "eval": "bun run src/eval.ts",
     "viz": "cd viz && bun dev"
   },
