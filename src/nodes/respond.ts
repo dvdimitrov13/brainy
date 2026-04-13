@@ -247,40 +247,7 @@ ${contextBlock}
 
         case "explore_topics": {
           const args = toolCall.args as { request: string };
-          const topicList = hipporag.getTopics();
-
-          if (topicList.length === 0) {
-            result = "No topics in memory yet.";
-          } else {
-            const resp = await llmFast.invoke([
-              {
-                role: "system" as const,
-                content: `Given a request and topic list, return relevant topics as JSON: {"relevant_topics": ["t1","t2"]}. Be inclusive.`,
-              },
-              {
-                role: "user" as const,
-                content: `Request: ${args.request}\nTopics: ${topicList.join(", ")}`,
-              },
-            ]);
-
-            const respText =
-              typeof resp.content === "string" ? resp.content : "";
-            try {
-              const jsonStr = respText
-                .replace(/```json\n?/g, "")
-                .replace(/```\n?/g, "")
-                .trim();
-              const parsed = JSON.parse(jsonStr) as {
-                relevant_topics: string[];
-              };
-              result =
-                parsed.relevant_topics.length > 0
-                  ? `Relevant topics: ${parsed.relevant_topics.join(", ")}`
-                  : "No matching topics found.";
-            } catch {
-              result = `Available topics: ${topicList.join(", ")}`;
-            }
-          }
+          result = await exploreTopicsCall(args.request);
           break;
         }
 
@@ -300,6 +267,60 @@ ${contextBlock}
   return {
     aiResponse: "I'm having trouble recalling. Could you rephrase?",
   };
+}
+
+/** Call Haiku to find relevant topics using structured output */
+async function exploreTopicsCall(request: string): Promise<string> {
+  const topicList = hipporag.getTopics();
+  if (topicList.length === 0) return "No topics in memory yet.";
+
+  const TOPIC_TOOL = {
+    type: "function" as const,
+    function: {
+      name: "select_topics",
+      description: "Select relevant topics from the list.",
+      parameters: {
+        type: "object" as const,
+        properties: {
+          relevant_topics: {
+            type: "array" as const,
+            items: { type: "string" as const },
+            description: "The relevant topic names from the provided list.",
+          },
+        },
+        required: ["relevant_topics"],
+      },
+    },
+  };
+
+  try {
+    const resp = await llmFast.invoke(
+      [
+        {
+          role: "system" as const,
+          content: "Select which topics from the list are relevant to the request. Be inclusive — if in doubt, include it.",
+        },
+        {
+          role: "user" as const,
+          content: `Request: ${request}\nTopics: ${topicList.join(", ")}`,
+        },
+      ],
+      {
+        tools: [TOPIC_TOOL],
+        tool_choice: { type: "tool" as const, name: "select_topics" },
+      }
+    );
+
+    const toolCall = resp.tool_calls?.[0];
+    if (!toolCall) return `Available topics: ${topicList.join(", ")}`;
+
+    const args = toolCall.args as { relevant_topics: string[] };
+    return args.relevant_topics.length > 0
+      ? `Relevant topics: ${args.relevant_topics.join(", ")}`
+      : "No matching topics found.";
+  } catch {
+    return `Available topics: ${topicList.join(", ")}`;
+  }
 }
 
 /** Format passages with tags for the LLM */

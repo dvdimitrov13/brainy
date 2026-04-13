@@ -39,7 +39,6 @@ import {
   normalizeEntity,
   cosineSimilarity,
   minMaxNormalize,
-  extractJsonFromResponse,
 } from "../utils.ts";
 
 export class HippoRAG {
@@ -778,39 +777,70 @@ export class HippoRAG {
     if (topics.length < 3) return; // nothing to consolidate
 
     try {
-      const response = await llmFast.invoke([
-        {
-          role: "system" as const,
-          content: `You consolidate a list of topic tags by grouping synonyms and near-duplicates.
+      const LINT_TOOL = {
+        type: "function" as const,
+        function: {
+          name: "consolidate_topics",
+          description: "Group synonym topic tags under canonical names.",
+          parameters: {
+            type: "object" as const,
+            properties: {
+              merges: {
+                type: "array" as const,
+                items: {
+                  type: "object" as const,
+                  properties: {
+                    canonical: { type: "string" as const, description: "The canonical topic name" },
+                    aliases: {
+                      type: "array" as const,
+                      items: { type: "string" as const },
+                      description: "Aliases to merge into the canonical name",
+                    },
+                  },
+                  required: ["canonical", "aliases"],
+                },
+                description: "Groups of synonym topics. Only include groups with actual aliases to merge.",
+              },
+            },
+            required: ["merges"],
+          },
+        },
+      };
 
-Return ONLY valid JSON mapping canonical names to their aliases:
-{
-  "canonical_name": ["alias1", "alias2"],
-  "another_topic": ["alias3"]
-}
+      const response = await llmFast.invoke(
+        [
+          {
+            role: "system" as const,
+            content: `Consolidate topic tags by grouping synonyms. Call consolidate_topics with merge groups.
 
 Rules:
-- Pick the most common or descriptive term as canonical
 - Group: plurals (property/properties), variants (real-estate/real estate), synonyms (home/house/property)
 - Keep specific names as-is (cedar-creek, brookside — don't merge location names)
-- If a topic has no synonyms, omit it from the output`,
-        },
+- Only include groups that have actual aliases to merge`,
+          },
+          {
+            role: "user" as const,
+            content: `Topic tags to consolidate:\n${topics.join(", ")}`,
+          },
+        ],
         {
-          role: "user" as const,
-          content: `Topic tags to consolidate:\n${topics.join(", ")}`,
-        },
-      ]);
+          tools: [LINT_TOOL],
+          tool_choice: { type: "tool" as const, name: "consolidate_topics" },
+        }
+      );
 
-      const responseText =
-        typeof response.content === "string"
-          ? response.content
-          : (response.content as Array<{ type: string; text?: string }>)
-              .filter((b) => b.type === "text")
-              .map((b) => b.text ?? "")
-              .join("");
+      const toolCall = response.tool_calls?.[0];
+      if (!toolCall) return;
 
-      const jsonStr = extractJsonFromResponse(responseText);
-      const mergeMap: Record<string, string[]> = JSON.parse(jsonStr);
+      const args = toolCall.args as {
+        merges: Array<{ canonical: string; aliases: string[] }>;
+      };
+
+      // Build reverse map: alias → canonical
+      const mergeMap: Record<string, string[]> = {};
+      for (const group of args.merges ?? []) {
+        mergeMap[group.canonical] = group.aliases;
+      }
 
       // Build reverse map: alias → canonical
       const aliasToCanonical = new Map<string, string>();

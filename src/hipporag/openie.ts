@@ -1,147 +1,137 @@
 /**
  * openie.ts — Combined summarization, triple extraction, and tagging.
  *
- * A single Haiku call processes each exchange into:
- *   1. A dense summary (4:1 compression)
- *   2. Knowledge triples (subject, predicate, object)
- *   3. Two-level tags (type + topics) for metadata filtering
- *   4. A salience score
- *
- * This replaces the separate summarization and extraction steps —
- * one LLM call does everything, keeping API costs low.
+ * A single Haiku call processes each exchange using tool-based structured
+ * output — the LLM "calls" a tool whose schema defines the exact output
+ * format, guaranteeing valid JSON.
  */
 
 import type { Triple, PassageTags, NoteType } from "./types.ts";
 import { llmFast } from "../llm.ts";
-import { extractJsonFromResponse, normalizeEntity } from "../utils.ts";
+import { normalizeEntity } from "../utils.ts";
 
 /** Result of processing a conversation exchange */
 export interface ProcessResult {
-  /** Dense summary of the exchange (~25% of original) */
   summary: string;
-  /** Extracted (subject, predicate, object) triples */
   triples: Triple[];
-  /** Two-level tags for filtering */
   tags: PassageTags;
-  /** Importance score 0-1 */
   salience: number;
 }
 
 const VALID_TYPES: NoteType[] = [
-  "event",
-  "decision",
-  "preference",
-  "fact",
-  "goal",
-  "plan",
+  "event", "decision", "preference", "fact", "goal", "plan",
 ];
+
+/** Tool schema for structured output */
+const PROCESS_TOOL = {
+  type: "function" as const,
+  function: {
+    name: "process_exchange",
+    description: "Process a conversation exchange into structured memory.",
+    parameters: {
+      type: "object" as const,
+      properties: {
+        summary: {
+          type: "string" as const,
+          description:
+            "Dense 1-3 sentence summary. Include key facts, dates, numbers, decisions. Skip pleasantries and generic advice. Compress to ~25% of original.",
+        },
+        triples: {
+          type: "array" as const,
+          items: {
+            type: "object" as const,
+            properties: {
+              subject: { type: "string" as const, description: "Entity name, lowercase, 1-3 words" },
+              predicate: { type: "string" as const, description: "Relationship: works_at, likes, viewed, purchased, costs, decided_on, etc." },
+              object: { type: "string" as const, description: "Entity name, lowercase, 1-3 words" },
+            },
+            required: ["subject", "predicate", "object"],
+          },
+          description: "1-5 knowledge triples — only the most important facts.",
+        },
+        tags: {
+          type: "object" as const,
+          properties: {
+            type: {
+              type: "array" as const,
+              items: {
+                type: "string" as const,
+                enum: ["event", "decision", "preference", "fact", "goal", "plan"],
+              },
+              description: "What kind of information: event (happened), decision (choice made), preference (like/dislike), fact (data), goal (target), plan (intention).",
+            },
+            topics: {
+              type: "array" as const,
+              items: { type: "string" as const },
+              description: "2-5 lowercase topic keywords: property, brookside, kitchen, cycling. Include searchable entity names.",
+            },
+          },
+          required: ["type", "topics"],
+        },
+        salience: {
+          type: "number" as const,
+          description: "Importance 0-1. 0.1-0.3: small talk. 0.4-0.6: routine. 0.7-0.9: important facts/decisions. 1.0: critical.",
+        },
+      },
+      required: ["summary", "triples", "tags", "salience"],
+    },
+  },
+};
 
 /**
  * Process a conversation exchange: summarize + extract triples + tag.
- *
- * Single LLM call that produces everything needed for HippoRAG indexing.
- *
- * @param text — the conversation exchange text
- * @returns { summary, triples, tags, salience }
+ * Uses tool-based structured output for guaranteed valid JSON.
  */
 export async function processExchange(
   text: string
 ): Promise<ProcessResult> {
   try {
-    const response = await llmFast.invoke([
+    const response = await llmFast.invoke(
+      [
+        {
+          role: "system" as const,
+          content: "Process the conversation exchange into structured memory by calling the process_exchange tool.",
+        },
+        { role: "user" as const, content: text },
+      ],
       {
-        role: "system" as const,
-        content: `You process conversation exchanges into structured memory. Return ONLY valid JSON.
+        tools: [PROCESS_TOOL],
+        tool_choice: { type: "tool" as const, name: "process_exchange" },
+      }
+    );
 
-{
-  "summary": "Dense 1-3 sentence summary of the exchange. Include key facts, dates, numbers, decisions. Skip pleasantries and generic advice.",
-  "triples": [
-    {"subject": "entity1", "predicate": "relation", "object": "entity2"}
-  ],
-  "tags": {
-    "type": ["event", "decision"],
-    "topics": ["property", "cedar-creek"]
-  },
-  "salience": 0.7
-}
+    // Extract tool call args — guaranteed valid JSON by the API
+    const toolCall = response.tool_calls?.[0];
+    if (!toolCall) throw new Error("No tool call returned");
 
-Summary rules:
-- Compress to ~25% of original length
-- Focus on facts established: decisions, events, numbers, dates, preferences
-- Include both user and assistant facts that matter (prices, names, specifics)
-- Skip generic advice the assistant could regenerate
-
-Triple rules:
-- Extract concrete entities and relationships
-- Normalize entity names to lowercase (1-3 words)
-- Use simple predicates: works_at, likes, viewed, purchased, costs, located_in, decided_on
-- 1-5 triples per exchange — only the most important facts
-
-Tag rules:
-- type (pick from FIXED list): event, decision, preference, fact, goal, plan
-  - event: something that happened (viewed property, bought item, had meeting)
-  - decision: a choice was made (chose quartz, went with AHS)
-  - preference: a like/dislike/want (wants pool, hates noise)
-  - fact: established data (price $340k, 4% interest, 10-mile commute)
-  - goal: something to achieve (1000 miles by summer)
-  - plan: future intention (schedule walk-through, order rack next week)
-- topics (OPEN list): lowercase keywords for what it's about
-  - Use specific terms: "property", "brookside", "kitchen", "mortgage", "cycling"
-  - Include entity names that might be searched: "cedar-creek", "ahs", "quartz"
-  - 2-5 topic tags per exchange
-
-Salience (0-1):
-- 0.1-0.3: small talk, greetings
-- 0.4-0.6: routine discussion
-- 0.7-0.9: important facts, decisions, events
-- 1.0: critical commitments`,
-      },
-      {
-        role: "user" as const,
-        content: text,
-      },
-    ]);
-
-    const responseText =
-      typeof response.content === "string"
-        ? response.content
-        : (response.content as Array<{ type: string; text?: string }>)
-            .filter((block) => block.type === "text")
-            .map((block) => block.text ?? "")
-            .join("");
-
-    const jsonStr = extractJsonFromResponse(responseText);
-    const parsed = JSON.parse(jsonStr) as {
+    const args = toolCall.args as {
       summary: string;
       triples: Array<{ subject: string; predicate: string; object: string }>;
       tags: { type: string[]; topics: string[] };
       salience: number;
     };
 
-    // Normalize triples
-    const triples: Triple[] = (parsed.triples ?? []).map((t) => ({
+    const triples: Triple[] = (args.triples ?? []).map((t) => ({
       subject: normalizeEntity(t.subject),
       predicate: t.predicate.toLowerCase().trim(),
       object: normalizeEntity(t.object),
     }));
 
-    // Validate and normalize tags
-    const validTypes = (parsed.tags?.type ?? []).filter((t): t is NoteType =>
+    const validTypes = (args.tags?.type ?? []).filter((t): t is NoteType =>
       VALID_TYPES.includes(t as NoteType)
-    );
-    const topics = (parsed.tags?.topics ?? []).map((t) =>
-      t.toLowerCase().trim()
     );
 
     const tags: PassageTags = {
       type: validTypes.length > 0 ? validTypes : ["fact"],
-      topics: topics.length > 0 ? topics : [],
+      topics: (args.tags?.topics ?? []).map((t) => t.toLowerCase().trim()),
     };
 
-    const salience = Math.max(0, Math.min(1, parsed.salience ?? 0.5));
-    const summary = parsed.summary?.trim() ?? text.slice(0, 200);
-
-    return { summary, triples, tags, salience };
+    return {
+      summary: args.summary?.trim() ?? text.slice(0, 200),
+      triples,
+      tags,
+      salience: Math.max(0, Math.min(1, args.salience ?? 0.5)),
+    };
   } catch (error) {
     console.error("[OpenIE] Failed to process exchange:", error);
     return {
@@ -153,9 +143,7 @@ Salience (0-1):
   }
 }
 
-/**
- * Convert a triple to a string for embedding.
- */
+/** Convert a triple to a string for embedding. */
 export function tripleToString(triple: Triple): string {
   return `${triple.subject} ${triple.predicate} ${triple.object}`;
 }
