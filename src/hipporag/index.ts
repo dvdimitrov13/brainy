@@ -39,6 +39,7 @@ import {
   normalizeEntity,
   cosineSimilarity,
   minMaxNormalize,
+  extractJsonFromResponse,
 } from "../utils.ts";
 
 export class HippoRAG {
@@ -808,7 +809,7 @@ Rules:
               .map((b) => b.text ?? "")
               .join("");
 
-      const jsonStr = responseText.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
+      const jsonStr = extractJsonFromResponse(responseText);
       const mergeMap: Record<string, string[]> = JSON.parse(jsonStr);
 
       // Build reverse map: alias → canonical
