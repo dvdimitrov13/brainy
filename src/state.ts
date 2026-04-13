@@ -36,6 +36,13 @@ export const BrainyState = Annotation.Root({
     default: () => [],
   }),
 
+  /** Auto-recognized triples (from contextualized query each turn).
+   *  Injected into the system prompt so the agent sees associations. */
+  recognizedTriples: Annotation<string>({
+    reducer: (_prev, next) => next,
+    default: () => "",
+  }),
+
   /** Conversation turn counter. */
   turnCount: Annotation<number>({
     reducer: (_prev, next) => next,

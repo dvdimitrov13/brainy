@@ -1,15 +1,15 @@
 /**
  * respond.ts — LangGraph node that generates the AI response.
  *
- * The agent has two tools:
- *   1. explore_topics(request) — Haiku finds relevant topics from the canonical list
- *   2. remember(query, type?, topics?) — search HippoRAG with optional tag filters
+ * The agent sees auto-recognized triples in the prompt (from retrieve node)
+ * and has 4 tools:
  *
- * The system prompt includes the canonical topic list so the agent knows
- * what topics exist. For complex queries, the agent can use explore_topics
- * to find the right filters before calling remember.
+ *   1. recognize(query, type?, topics?) — find triples with a custom query
+ *   2. recall(query) — PPR using last recognized triples → passages
+ *   3. remember(query, type?, topics?) — convenience: recognize + recall
+ *   4. explore_topics(request) — find relevant topic filters via Haiku
  *
- * Graph position: START → [respond] → memorize → END
+ * Graph position: START → retrieve → [respond] → memorize → END
  */
 
 import {
@@ -22,24 +22,54 @@ import type { BrainyState } from "../state.ts";
 import { llm, llmFast } from "../llm.ts";
 import { hipporag } from "../singletons.ts";
 
-const EXPLORE_TOPICS_TOOL = {
+// ══════════════════════════════════════════════
+// TOOL DEFINITIONS
+// ══════════════════════════════════════════════
+
+const RECOGNIZE_TOOL = {
   type: "function" as const,
   function: {
-    name: "explore_topics",
+    name: "recognize",
     description:
-      "Find which memory topics are relevant to your question. " +
-      "Returns a list of matching topic tags you can use to filter your remember calls. " +
-      "Use this first for complex or broad questions to discover the right filters.",
+      "Search for entity associations in long-term memory. Returns triples (subject, predicate, object). " +
+      "Use when the auto-recognized associations aren't enough or you want to search from a different angle. " +
+      "After recognize, call recall to get full passages seeded by these triples.",
     parameters: {
       type: "object" as const,
       properties: {
-        request: {
-          type: "string" as const,
-          description:
-            "Describe what you're looking for. E.g., 'all properties the user viewed'",
+        query: { type: "string" as const, description: "Focused search query." },
+        type: {
+          type: "array" as const,
+          items: { type: "string" as const },
+          description: 'Optional type filter: "event","decision","preference","fact","goal","plan".',
+        },
+        topics: {
+          type: "array" as const,
+          items: { type: "string" as const },
+          description: "Optional topic filter.",
         },
       },
-      required: ["request"],
+      required: ["query"],
+    },
+  },
+};
+
+const RECALL_TOOL = {
+  type: "function" as const,
+  function: {
+    name: "recall",
+    description:
+      "Retrieve full conversation summaries from long-term memory using the most recently recognized triples as seeds. " +
+      "Call this after seeing relevant triples (auto-recognized or from a recognize call) to get the actual details.",
+    parameters: {
+      type: "object" as const,
+      properties: {
+        query: {
+          type: "string" as const,
+          description: "The search query for passage ranking.",
+        },
+      },
+      required: ["query"],
     },
   },
 };
@@ -49,27 +79,22 @@ const REMEMBER_TOOL = {
   function: {
     name: "remember",
     description:
-      "Search long-term memory for relevant information. " +
-      "Use type and topics filters (from explore_topics or the topic list) to narrow results. " +
+      "Full memory search from scratch: finds triples AND retrieves passages in one call. " +
+      "Use when you want results without calling recognize + recall separately. " +
       "For counting/listing, make multiple calls with different filters.",
     parameters: {
       type: "object" as const,
       properties: {
-        query: {
-          type: "string" as const,
-          description: "A focused search query.",
-        },
+        query: { type: "string" as const, description: "Search query." },
         type: {
           type: "array" as const,
           items: { type: "string" as const },
-          description:
-            'Type filter: "event", "decision", "preference", "fact", "goal", "plan".',
+          description: 'Type filter: "event","decision","preference","fact","goal","plan".',
         },
         topics: {
           type: "array" as const,
           items: { type: "string" as const },
-          description:
-            "Topic filter: use exact topic names from the topic list or explore_topics results.",
+          description: "Topic filter.",
         },
       },
       required: ["query"],
@@ -77,7 +102,31 @@ const REMEMBER_TOOL = {
   },
 };
 
-const TOOLS = [EXPLORE_TOPICS_TOOL, REMEMBER_TOOL];
+const EXPLORE_TOPICS_TOOL = {
+  type: "function" as const,
+  function: {
+    name: "explore_topics",
+    description:
+      "Discover which memory topics exist and are relevant to your question. " +
+      "Use before recognize/remember to find the right topic filters.",
+    parameters: {
+      type: "object" as const,
+      properties: {
+        request: {
+          type: "string" as const,
+          description: "What you're looking for.",
+        },
+      },
+      required: ["request"],
+    },
+  },
+};
+
+const TOOLS = [RECOGNIZE_TOOL, RECALL_TOOL, REMEMBER_TOOL, EXPLORE_TOPICS_TOOL];
+
+// ══════════════════════════════════════════════
+// RESPOND NODE
+// ══════════════════════════════════════════════
 
 export async function respondNode(
   state: typeof BrainyState.State
@@ -88,8 +137,13 @@ export async function respondNode(
     parts.push(`Conversation so far:\n${state.conversationBuffer}`);
   }
 
-  const stats = hipporag.getStats();
+  if (state.recognizedTriples) {
+    parts.push(
+      `Memory associations (auto-recognized):\n${state.recognizedTriples}`
+    );
+  }
 
+  const stats = hipporag.getStats();
   if (stats.passages > 0) {
     parts.push(
       `Long-term memory: ${stats.passages} passages, ${stats.entities} entities`
@@ -100,19 +154,18 @@ export async function respondNode(
 
   const systemPrompt = `You are a helpful, friendly assistant with long-term memory.
 
-You have two tools:
-- **explore_topics(request)** — finds which memory topics match your question. Use first for complex queries.
-- **remember(query, type?, topics?)** — searches past conversations. Use type/topics filters for precise results.
+You have four memory tools:
+- **recognize(query)** — find entity associations (triples). Use to search from a different angle.
+- **recall(query)** — retrieve full passages using the last recognized triples as seeds. Call after seeing relevant triples.
+- **remember(query)** — full search from scratch (recognize + recall in one call).
+- **explore_topics(request)** — discover available topic tags for filtering.
 
-Types: event, decision, preference, fact, goal, plan
-Topics: use explore_topics first to discover available topic names.
+Memory associations are auto-recognized each turn and shown above. If they're relevant, call **recall** to get the full details. If you need to search differently, use **recognize** or **remember**.
 
-How to use:
-- For simple recall: remember with a focused query
-- For counting/listing: explore_topics first, then remember with each relevant topic
-- For casual conversation: just respond directly
+For counting/listing questions: use explore_topics first, then remember with different topic filters.
+For casual conversation: just respond directly.
 
-Do NOT mention your tools. Respond naturally.
+Do NOT mention your memory tools. Respond naturally.
 
 --- Your Memory ---
 ${contextBlock}
@@ -127,7 +180,6 @@ ${contextBlock}
 
   for (let i = 0; i < maxToolCalls; i++) {
     const response = await llm.invoke(messages, { tools: TOOLS });
-
     const toolCalls = response.tool_calls;
 
     if (!toolCalls || toolCalls.length === 0) {
@@ -138,7 +190,6 @@ ${contextBlock}
               .filter((block) => block.type === "text")
               .map((block) => block.text ?? "")
               .join("");
-
       return { aiResponse };
     }
 
@@ -147,72 +198,94 @@ ${contextBlock}
     for (const toolCall of toolCalls) {
       let result = "";
 
-      if (toolCall.name === "explore_topics") {
-        const args = toolCall.args as { request: string };
-
-        // Ask Haiku which topics from the canonical list are relevant
-        const topicList = hipporag.getTopics();
-        if (topicList.length === 0) {
-          result = "No topics in memory yet.";
-        } else {
-          const resp = await llmFast.invoke([
-            {
-              role: "system" as const,
-              content: `Given a request and a list of memory topics, return which topics are relevant.
-
-Return ONLY valid JSON: {"relevant_topics": ["topic1", "topic2"]}
-
-Pick only topics that are clearly relevant to the request. Be inclusive rather than exclusive — if in doubt, include it.`,
-            },
-            {
-              role: "user" as const,
-              content: `Request: ${args.request}\n\nAvailable topics: ${topicList.join(", ")}`,
-            },
-          ]);
-
-          const respText =
-            typeof resp.content === "string"
-              ? resp.content
-              : (resp.content as Array<{ type: string; text?: string }>)
-                  .filter((b) => b.type === "text")
-                  .map((b) => b.text ?? "")
-                  .join("");
-
-          try {
-            const jsonStr = respText.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
-            const parsed = JSON.parse(jsonStr) as {
-              relevant_topics: string[];
-            };
-            result =
-              parsed.relevant_topics.length > 0
-                ? `Relevant topics: ${parsed.relevant_topics.join(", ")}`
-                : "No matching topics found.";
-          } catch {
-            result = `Available topics: ${topicList.join(", ")}`;
-          }
+      switch (toolCall.name) {
+        case "recognize": {
+          const args = toolCall.args as {
+            query: string;
+            type?: string[];
+            topics?: string[];
+          };
+          const triples = await hipporag.recognize(
+            args.query,
+            args.type,
+            args.topics
+          );
+          result =
+            triples.length > 0
+              ? triples
+                  .map(
+                    (t, idx) =>
+                      `${idx + 1}. (${t.subject}, ${t.predicate}, ${t.object})`
+                  )
+                  .join("\n")
+              : "No associations found.";
+          break;
         }
-      } else if (toolCall.name === "remember") {
-        const args = toolCall.args as {
-          query: string;
-          type?: string[];
-          topics?: string[];
-        };
 
-        const passages = await hipporag.retrieve(
-          args.query,
-          args.type,
-          args.topics
-        );
+        case "recall": {
+          const args = toolCall.args as { query: string };
+          // Uses lastRecognizedTriples from the most recent recognize call
+          const passages = await hipporag.recall(args.query);
+          result = formatPassages(passages);
+          break;
+        }
 
-        result =
-          passages.length > 0
-            ? passages
-                .map((p, idx) => {
-                  const tagStr = `[${p.tags.type.join(",")}] [${p.tags.topics.join(",")}]`;
-                  return `[Memory ${idx + 1}] ${tagStr}: ${p.text}`;
-                })
-                .join("\n\n")
-            : "No relevant memories found.";
+        case "remember": {
+          const args = toolCall.args as {
+            query: string;
+            type?: string[];
+            topics?: string[];
+          };
+          const passages = await hipporag.retrieve(
+            args.query,
+            args.type,
+            args.topics
+          );
+          result = formatPassages(passages);
+          break;
+        }
+
+        case "explore_topics": {
+          const args = toolCall.args as { request: string };
+          const topicList = hipporag.getTopics();
+
+          if (topicList.length === 0) {
+            result = "No topics in memory yet.";
+          } else {
+            const resp = await llmFast.invoke([
+              {
+                role: "system" as const,
+                content: `Given a request and topic list, return relevant topics as JSON: {"relevant_topics": ["t1","t2"]}. Be inclusive.`,
+              },
+              {
+                role: "user" as const,
+                content: `Request: ${args.request}\nTopics: ${topicList.join(", ")}`,
+              },
+            ]);
+
+            const respText =
+              typeof resp.content === "string" ? resp.content : "";
+            try {
+              const jsonStr = respText
+                .replace(/```json\n?/g, "")
+                .replace(/```\n?/g, "")
+                .trim();
+              const parsed = JSON.parse(jsonStr) as {
+                relevant_topics: string[];
+              };
+              result =
+                parsed.relevant_topics.length > 0
+                  ? `Relevant topics: ${parsed.relevant_topics.join(", ")}`
+                  : "No matching topics found.";
+            } catch {
+              result = `Available topics: ${topicList.join(", ")}`;
+            }
+          }
+          break;
+        }
+
+        default:
+          result = `Unknown tool: ${toolCall.name}`;
       }
 
       messages.push(
@@ -227,4 +300,17 @@ Pick only topics that are clearly relevant to the request. Be inclusive rather t
   return {
     aiResponse: "I'm having trouble recalling. Could you rephrase?",
   };
+}
+
+/** Format passages with tags for the LLM */
+function formatPassages(
+  passages: import("../hipporag/types.ts").Passage[]
+): string {
+  if (passages.length === 0) return "No relevant memories found.";
+  return passages
+    .map((p, idx) => {
+      const tagStr = `[${p.tags.type.join(",")}] [${p.tags.topics.join(",")}]`;
+      return `[Memory ${idx + 1}] ${tagStr}: ${p.text}`;
+    })
+    .join("\n\n");
 }

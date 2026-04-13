@@ -86,6 +86,9 @@ export class HippoRAG {
   /** Auto-incrementing counter for passage IDs */
   private nextPassageIndex = 0;
 
+  /** Last recognized triples — used by recall() as PPR seeds */
+  private lastRecognizedTriples: Triple[] = [];
+
   // ──────────────────────────────────────────────
   // Constructor
   // ──────────────────────────────────────────────
@@ -373,7 +376,9 @@ export class HippoRAG {
     }
 
     // ── Step 4: Recognition memory — LLM filters triples ──
-    return await filterTriples(query, candidateTriples);
+    const filtered = await filterTriples(query, candidateTriples);
+    this.lastRecognizedTriples = filtered;
+    return filtered;
   }
 
   /**
@@ -392,7 +397,7 @@ export class HippoRAG {
    */
   async recall(
     query: string,
-    triples: Triple[],
+    triples?: Triple[],
     typeFilter?: string[],
     topicFilter?: string[]
   ): Promise<Passage[]> {
@@ -400,9 +405,11 @@ export class HippoRAG {
 
     const queryEmbedding = await embedQuery(query);
 
+    // Use provided triples or fall back to last recognized
+    const seeds = triples ?? this.lastRecognizedTriples;
+
     // No triples = nothing to seed PPR with. Return empty.
-    // The agent must recognize before it can recall.
-    if (triples.length === 0) return [];
+    if (seeds.length === 0) return [];
 
     // Recompute fact scores for the provided triples to build phrase weights
     const factIds = this.factStore.getAllIds();
@@ -436,7 +443,7 @@ export class HippoRAG {
     const phraseWeights = new Map<string, number>();
     const phraseOccurrences = new Map<string, number>();
 
-    for (const triple of triples) {
+    for (const triple of seeds) {
       const key = `${triple.subject}|${triple.predicate}|${triple.object}`;
       const factScore = tripleScoreMap.get(key) ?? 0;
 
