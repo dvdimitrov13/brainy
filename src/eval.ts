@@ -167,9 +167,41 @@ function getEvalTools() {
     {
       type: "function" as const,
       function: {
+        name: "recognize",
+        description:
+          "Search for entity associations in memory. Returns triples. Call recall after to get full passages.",
+        parameters: {
+          type: "object" as const,
+          properties: {
+            query: { type: "string" as const, description: "Search query" },
+            type: { type: "array" as const, items: { type: "string" as const }, description: "Type filter" },
+            topics: { type: "array" as const, items: { type: "string" as const }, description: "Topic filter" },
+          },
+          required: ["query"],
+        },
+      },
+    },
+    {
+      type: "function" as const,
+      function: {
+        name: "recall",
+        description:
+          "Retrieve full passages using the last recognized triples as seeds.",
+        parameters: {
+          type: "object" as const,
+          properties: {
+            query: { type: "string" as const, description: "Search query for ranking" },
+          },
+          required: ["query"],
+        },
+      },
+    },
+    {
+      type: "function" as const,
+      function: {
         name: "explore_topics",
         description:
-          "Find which memory topics match your question. Returns relevant topic tags for filtering.",
+          "Find which memory topics match your question.",
         parameters: {
           type: "object" as const,
           properties: {
@@ -184,7 +216,7 @@ function getEvalTools() {
       function: {
         name: "remember",
         description:
-          "Search long-term memory. Use type/topics filters for precise results. " +
+          "Full memory search from scratch (recognize + recall in one call). " +
           "For counting/listing, make multiple calls with different filters.",
         parameters: {
           type: "object" as const,
@@ -206,6 +238,20 @@ function getEvalTools() {
       },
     },
   ];
+}
+
+// ══════════════════════════════════════════════
+// HELPERS
+// ══════════════════════════════════════════════
+
+function formatPassages(passages: import("./hipporag/types.ts").Passage[]): string {
+  if (passages.length === 0) return "No relevant memories found.";
+  return passages
+    .map((p, idx) => {
+      const tagStr = `[${p.tags.type.join(",")}] [${p.tags.topics.join(",")}]`;
+      return `[Memory ${idx + 1}] ${tagStr}: ${p.text}`;
+    })
+    .join("\n\n");
 }
 
 // ══════════════════════════════════════════════
@@ -430,14 +476,14 @@ export async function evaluateQuestion(
     new SystemMessage(
       `You are a helpful assistant with long-term memory.
 
-You have two tools:
-- **explore_topics(request)** — finds which memory topics match your question
-- **remember(query, type?, topics?)** — searches past conversations with optional filters
+You have four memory tools:
+- **recognize(query)** — find entity associations (triples). Call recall after to get passages.
+- **recall(query)** — retrieve full passages using last recognized triples as seeds.
+- **remember(query)** — full search from scratch (recognize + recall in one call).
+- **explore_topics(request)** — discover available topic tags for filtering.
 
-Types: event, decision, preference, fact, goal, plan
-Topics: use explore_topics first to discover available topic names.
-
-For counting/listing: explore_topics first, then remember with each relevant topic.
+For simple recall: remember with a focused query.
+For counting/listing: explore_topics first, then remember with different topic filters.
 
 Do NOT mention your tools. Respond naturally.
 
@@ -473,46 +519,33 @@ ${contextParts.join("\n\n")}
       const callStart = Date.now();
       let result = "";
 
-      if (toolCall.name === "explore_topics") {
+      console.log(`    [tool] ${toolCall.name}(${JSON.stringify(toolCall.args).slice(0, 80)})`);
+
+      if (toolCall.name === "recognize") {
+        const args = toolCall.args as { query: string; type?: string[]; topics?: string[] };
+        const triples = await hipporag.recognize(args.query, args.type, args.topics);
+        result = triples.length > 0
+          ? triples.map((t, idx) => `${idx + 1}. (${t.subject}, ${t.predicate}, ${t.object})`).join("\n")
+          : "No associations found.";
+      } else if (toolCall.name === "recall") {
+        const args = toolCall.args as { query: string };
+        const passages = await hipporag.recall(args.query);
+        result = formatPassages(passages);
+      } else if (toolCall.name === "remember") {
+        const args = toolCall.args as { query: string; type?: string[]; topics?: string[] };
+        const passages = await hipporag.retrieve(args.query, args.type, args.topics);
+        result = formatPassages(passages);
+      } else if (toolCall.name === "explore_topics") {
         const args = toolCall.args as { request: string };
         result = await exploreTopicsCall(hipporag, args.request);
-
-        toolCallTraces.push({
-          tool: "explore_topics",
-          query: JSON.stringify(args),
-          result,
-          durationMs: Date.now() - callStart,
-        });
-      } else if (toolCall.name === "remember") {
-        const args = toolCall.args as {
-          query: string;
-          type?: string[];
-          topics?: string[];
-        };
-
-        const passages = await hipporag.retrieve(
-          args.query,
-          args.type,
-          args.topics
-        );
-
-        result =
-          passages.length > 0
-            ? passages
-                .map((p, idx) => {
-                  const tagStr = `[${p.tags.type.join(",")}] [${p.tags.topics.join(",")}]`;
-                  return `[Memory ${idx + 1}] ${tagStr}: ${p.text}`;
-                })
-                .join("\n\n")
-            : "No relevant memories found.";
-
-        toolCallTraces.push({
-          tool: "remember",
-          query: JSON.stringify(args),
-          result,
-          durationMs: Date.now() - callStart,
-        });
       }
+
+      toolCallTraces.push({
+        tool: toolCall.name,
+        query: JSON.stringify(toolCall.args),
+        result,
+        durationMs: Date.now() - callStart,
+      });
 
       // Every tool call needs a matching ToolMessage
       messages.push(
